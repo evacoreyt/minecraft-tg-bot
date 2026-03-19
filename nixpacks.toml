@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["nodejs-18_x", "python311"]
+
+[phases.install]
+cmds = [
+  "pip install -r requirements.txt",
+  "npm install"
+]
+
+[start]
+cmd = "python main.py"
