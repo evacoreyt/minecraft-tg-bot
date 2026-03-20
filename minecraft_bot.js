@@ -11,7 +11,7 @@ try {
 }
 
 // ---------- Настройки ----------
-const PROXY_FILE = path.join(__dirname, 'proxies.txt');      // ← читаем напрямую
+const PROXY_FILE = path.join(__dirname, 'proxies.txt');      // читаем напрямую
 const RECONNECT_DELAY = 5000;       // 5 секунд между попытками
 const MAX_RECONNECT_ATTEMPTS = 20;  // максимальное число попыток
 const CONNECTION_TIMEOUT = 30000;   // 30 секунд таймаут подключения
@@ -31,6 +31,13 @@ function loadProxyList() {
         proxyList = content.split('\n')
             .map(line => line.trim())
             .filter(line => line && !line.startsWith('#'));
+        // Убедимся, что у каждого прокси есть схема socks5://
+        proxyList = proxyList.map(proxy => {
+            if (!proxy.startsWith('socks5://')) {
+                return 'socks5://' + proxy;
+            }
+            return proxy;
+        });
         console.log(`📄 Загружено ${proxyList.length} прокси из ${PROXY_FILE}`);
         if (proxyList.length === 0) {
             console.log('⚠️ Список прокси пуст, работаем без прокси');
@@ -89,7 +96,7 @@ function createBotWithProxy(proxyUrl) {
                 proxy: proxyConfig,
                 command: 'connect',
                 destination: {
-                    host: serverIp,
+                    host: serverIp,      // ← важно: передаём домен, а не IP
                     port: serverPort
                 },
                 timeout: 30000
