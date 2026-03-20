@@ -1,6 +1,7 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
-# Автоматическая проверка и выбор лучших прокси по пингу
+# Автоматическая проверка и сортировка прокси по пингу, поддержка до 1000 ботов,
+# кэширование результатов, команда /refresh_proxies
 
 import os
 import subprocess
@@ -33,12 +34,11 @@ active_bots = {}
 # Хранилище состояний пользователей для пошагового диалога
 user_data = {}
 
-# Кэш для отсортированных прокси (обновляется раз в 5 минут)
-proxy_cache = {
-    'list': None,
-    'last_update': 0
-}
+# Кэш для отсортированных прокси
+PROXY_CACHE_FILE = "sorted_proxies.txt"
 PROXY_CACHE_TTL = 300  # 5 минут
+last_proxy_check = 0
+cached_proxy_list = None
 
 # --- Функция проверки пинга одного прокси ---
 def ping_proxy(proxy_str, timeout=5):
@@ -65,7 +65,7 @@ def ping_proxy(proxy_str, timeout=5):
         return (proxy_str, None)
 
 # --- Асинхронная проверка всех прокси ---
-async def check_proxies(proxy_list, timeout=5, max_concurrent=50):
+async def check_proxies(proxy_list, timeout=5, max_concurrent=100):
     """
     Асинхронно проверяет пинг списка прокси, возвращает список (proxy, ping)
     отсортированный по пингу (от меньшего к большему).
@@ -73,7 +73,6 @@ async def check_proxies(proxy_list, timeout=5, max_concurrent=50):
     if not proxy_list:
         return []
 
-    # Используем asyncio.to_thread для запуска синхронных измерений в пуле потоков
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def check_one(proxy):
@@ -83,14 +82,12 @@ async def check_proxies(proxy_list, timeout=5, max_concurrent=50):
     tasks = [check_one(p) for p in proxy_list]
     results = await asyncio.gather(*tasks)
 
-    # Фильтруем только успешные
     good = [(p, ping) for p, ping in results if ping is not None]
-    # Сортируем по пингу
     good.sort(key=lambda x: x[1])
     return good
 
-# --- Загрузка прокси из файла ---
-def load_proxies_from_file():
+# --- Загрузка исходных прокси из файла ---
+def load_raw_proxies():
     proxies_file = "proxies.txt"
     try:
         with open(proxies_file, 'r') as f:
@@ -101,30 +98,36 @@ def load_proxies_from_file():
         logger.warning(f"Файл {proxies_file} не найден. Боты будут работать без прокси.")
         return []
 
-# --- Получение отсортированного списка прокси (с кэшированием) ---
-async def get_sorted_proxies(force_refresh=False):
+# --- Обновление отсортированного списка прокси ---
+async def update_sorted_proxies(force=False):
+    global last_proxy_check, cached_proxy_list
     now = time.time()
-    if not force_refresh and proxy_cache['list'] is not None and (now - proxy_cache['last_update']) < PROXY_CACHE_TTL:
+    if not force and cached_proxy_list is not None and (now - last_proxy_check) < PROXY_CACHE_TTL:
         logger.info("Использую кэшированный список прокси")
-        return proxy_cache['list']
+        return cached_proxy_list
 
-    proxies = load_proxies_from_file()
-    if not proxies:
-        proxy_cache['list'] = []
-        proxy_cache['last_update'] = now
+    raw_proxies = load_raw_proxies()
+    if not raw_proxies:
+        cached_proxy_list = []
+        last_proxy_check = now
         return []
 
-    logger.info(f"Проверяю {len(proxies)} прокси...")
-    good_proxies = await check_proxies(proxies)
+    logger.info(f"Проверяю {len(raw_proxies)} прокси...")
+    good_proxies = await check_proxies(raw_proxies)
     logger.info(f"Рабочих прокси: {len(good_proxies)}")
     if good_proxies:
         # Выводим топ-5 для информации
         top5 = [f"{p[0]} ({p[1]:.0f}ms)" for p in good_proxies[:5]]
         logger.info(f"Лучшие прокси: {', '.join(top5)}")
 
-    proxy_cache['list'] = good_proxies
-    proxy_cache['last_update'] = now
-    return good_proxies
+    # Сохраняем в файл только адреса (без пингов)
+    with open(PROXY_CACHE_FILE, 'w') as f:
+        for proxy, _ in good_proxies:
+            f.write(proxy + '\n')
+
+    cached_proxy_list = [proxy for proxy, _ in good_proxies]
+    last_proxy_check = now
+    return cached_proxy_list
 
 # --- Проверка доступности node ---
 def check_node():
@@ -145,9 +148,9 @@ def check_node():
         logger.error(f"Ошибка при проверке node: {e}")
         return False
 
-# --- Вспомогательная функция для запуска бота (с прокси) ---
-async def launch_bot(update, ip, port, nick, proxy_url=None):
-    """Запускает Minecraft-бота с указанным прокси (или без)."""
+# --- Вспомогательная функция для запуска бота (без прокси, только IP, порт, ник) ---
+async def launch_bot(update, ip, port, nick):
+    """Запускает Minecraft-бота. Прокси управляются внутри minecraft_bot.js (из sorted_proxies.txt)."""
     if nick in active_bots:
         await update.message.reply_text(f"❌ Бот с ником **{nick}** уже запущен. Используй другой ник.")
         return False
@@ -157,8 +160,6 @@ async def launch_bot(update, ip, port, nick, proxy_url=None):
         return False
 
     args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
-    if proxy_url:
-        args.append(proxy_url)
 
     try:
         process = subprocess.Popen(
@@ -168,15 +169,13 @@ async def launch_bot(update, ip, port, nick, proxy_url=None):
         )
         active_bots[nick] = {
             'process': process,
-            'start_time': time.time(),
-            'proxy': proxy_url
+            'start_time': time.time()
         }
         asyncio.create_task(wait_for_bot(nick, process))
 
-        msg = f"✅ Бот **{nick}** запущен.\nПодключается к **{ip}:{port}**."
-        if proxy_url:
-            msg += f"\nИспользует прокси: {proxy_url}"
-        await update.message.reply_text(msg)
+        await update.message.reply_text(
+            f"✅ Бот **{nick}** запущен.\nПодключается к **{ip}:{port}**.\nПодробности в логах Railway."
+        )
         return True
     except Exception as e:
         logger.error(f"Ошибка при запуске бота {nick}: {e}")
@@ -204,7 +203,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Команды:\n"
         "/connect — пошагово создать одного бота\n"
-        "/create <количество> [префикс] — создать несколько ботов (до 100)\n"
+        "/create <количество> [префикс] — создать несколько ботов (до 1000)\n"
         "/stop <ник> — остановить конкретного бота\n"
         "/stop_all — остановить всех ботов\n"
         "/list — список активных ботов (только ники)\n"
@@ -232,8 +231,8 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Количество должно быть числом.")
         return
 
-    if count < 1 or count > 100:
-        await update.message.reply_text("Количество должно быть от 1 до 100.")
+    if count < 1 or count > 1000:  # изменено с 100 на 1000
+        await update.message.reply_text("Количество должно быть от 1 до 1000.")
         return
 
     prefix = args[1] if len(args) > 1 else "Astral"
@@ -308,15 +307,14 @@ async def status_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for nick, data in active_bots.items():
         uptime_seconds = time.time() - data['start_time']
         uptime_str = str(datetime.timedelta(seconds=int(uptime_seconds)))
-        proxy_info = f" (прокси: {data.get('proxy', 'нет')})" if data.get('proxy') else ""
-        lines.append(f"**{nick}** — PID {data['process'].pid}, работает {uptime_str}{proxy_info}")
+        lines.append(f"**{nick}** — PID {data['process'].pid}, работает {uptime_str}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def refresh_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Принудительно обновляет список прокси."""
     await update.message.reply_text("🔄 Обновляю список прокси... Это может занять до минуты.")
-    await get_sorted_proxies(force_refresh=True)
-    await update.message.reply_text(f"✅ Список обновлён. Рабочих прокси: {len(proxy_cache['list'])}")
+    await update_sorted_proxies(force=True)
+    await update.message.reply_text(f"✅ Список обновлён. Рабочих прокси: {len(cached_proxy_list)}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -335,7 +333,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = user_data[user_id]
 
-    # --- Обработка одиночного бота (/connect) ---
     if state.get('step') == 'waiting_for_ip':
         state['ip'] = text
         state['step'] = 'waiting_for_port'
@@ -355,18 +352,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nick = text
         ip = state['ip']
         port = state['port']
-
-        # Получаем отсортированные прокси
-        sorted_proxies = await get_sorted_proxies()
-        if sorted_proxies:
-            best_proxy = sorted_proxies[0][0]  # берём первый (самый быстрый)
-            await launch_bot(update, ip, port, nick, best_proxy)
-        else:
-            await launch_bot(update, ip, port, nick)  # без прокси
+        await launch_bot(update, ip, port, nick)
         del user_data[user_id]
         return
 
-    # --- Обработка массового создания (/create) ---
     elif state.get('step') == 'waiting_for_ip_for_create':
         state['ip'] = text
         state['step'] = 'waiting_for_port_for_create'
@@ -378,36 +367,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif state.get('step') == 'waiting_for_port_for_create':
         port = text if text else '25565'
         nicks = state['nicks']
-
-        # Получаем отсортированные прокси
-        sorted_proxies = await get_sorted_proxies()
-        if not sorted_proxies:
-            # Нет рабочих прокси – запускаем без прокси
-            await update.message.reply_text("⚠️ Нет рабочих прокси. Боты будут подключаться без прокси.")
-            success = 0
-            for nick in nicks:
-                if await launch_bot(update, state['ip'], port, nick):
-                    success += 1
-            await update.message.reply_text(
-                f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
-            )
-            del user_data[user_id]
-            return
-
-        # Отдаём лучшие прокси по очереди
         success = 0
-        # Копируем список прокси, чтобы не менять оригинал
-        proxies_iter = iter(sorted_proxies)
         for nick in nicks:
-            try:
-                proxy_url = next(proxies_iter)[0]
-            except StopIteration:
-                # Прокси закончились – начинаем сначала
-                proxies_iter = iter(sorted_proxies)
-                proxy_url = next(proxies_iter)[0]
-            if await launch_bot(update, state['ip'], port, nick, proxy_url):
+            if await launch_bot(update, state['ip'], port, nick):
                 success += 1
-
         await update.message.reply_text(
             f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
         )
@@ -422,6 +385,9 @@ def main():
         logger.error("Node.js не доступен! Бот не сможет запускать Minecraft-ботов.")
     else:
         logger.info("Node.js доступен, всё готово к работе.")
+
+    # Запускаем асинхронную проверку прокси при старте (не блокируя)
+    asyncio.create_task(update_sorted_proxies())
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
