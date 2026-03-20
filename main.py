@@ -1,9 +1,6 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
-# Автоматическая проверка и сортировка прокси по пингу, поддержка до 1000 ботов,
-# кэширование результатов, команда /refresh_proxies
-# Добавлены: лимит ботов, семафор запуска, увеличенная задержка,
-# кэш проверки Node.js, улучшенная запись прокси, предупреждение при отсутствии файла
+# Исправления: импорт timedelta, автоматическое создание proxy-файла при старте
 
 import os
 import subprocess
@@ -12,7 +9,7 @@ import sys
 import asyncio
 import time
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta  # ← исправлено
 from urllib.parse import urlparse
 from telegram import Update, ForceReply
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -347,7 +344,7 @@ async def status_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for nick, data in active_bots.items():
         uptime_seconds = time.time() - data['start_time']
-        uptime_str = str(datetime.timedelta(seconds=int(uptime_seconds)))
+        uptime_str = str(timedelta(seconds=int(uptime_seconds)))  # ← исправлено
         lines.append(f"**{nick}** — PID {data['process'].pid}, работает {uptime_str}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -428,8 +425,16 @@ def main():
     else:
         logger.info("Node.js доступен, всё готово к работе.")
 
+    # Создаём приложение
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # Запускаем проверку прокси в фоне, если файла нет
+    if not os.path.exists(PROXY_CACHE_FILE):
+        logger.info("Файл прокси отсутствует, запускаю фоновую проверку...")
+        # Запускаем асинхронную задачу без ожидания
+        asyncio.create_task(update_sorted_proxies(force=True))
+
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("connect", connect))
     app.add_handler(CommandHandler("create", create_command))
