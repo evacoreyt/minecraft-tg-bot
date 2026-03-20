@@ -1,7 +1,6 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
-# Исправлена проверка прокси: теперь реальный SOCKS5 handshake.
-# Исправлен импорт timedelta.
+# Упрощённая версия: боты используют прокси из proxies.txt напрямую.
 
 import os
 import subprocess
@@ -9,10 +8,7 @@ import logging
 import sys
 import asyncio
 import time
-import socket
-import struct
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
 from telegram import Update, ForceReply
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -33,114 +29,11 @@ logger = logging.getLogger(__name__)
 active_bots = {}
 user_data = {}
 
-PROXY_CACHE_FILE = "sorted_proxies.txt"
-PROXY_CACHE_TTL = 300
-last_proxy_check = 0
-cached_proxy_list = None
-
 # --- НОВЫЕ НАСТРОЙКИ ---
-MAX_BOTS = 100
-bot_launch_semaphore = asyncio.Semaphore(20)
+MAX_BOTS = 100                     # Максимальное количество активных ботов
+bot_launch_semaphore = asyncio.Semaphore(20)   # Одновременно запускаем не более 20 ботов
 _last_node_check = 0
 _node_check_result = False
-
-# --- Новая функция проверки SOCKS5 ---
-def check_socks5_proxy(proxy_str, timeout=5):
-    """
-    Проверяет, является ли прокси рабочим SOCKS5.
-    Возвращает (proxy_str, ping_ms) или (proxy_str, None).
-    """
-    try:
-        parsed = urlparse(proxy_str)
-        if parsed.scheme != 'socks5':
-            return (proxy_str, None)
-        host = parsed.hostname
-        port = parsed.port
-        if not host or not port:
-            return (proxy_str, None)
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        start = time.time()
-        sock.connect((host, port))
-        # SOCKS5 handshake
-        sock.sendall(b'\x05\x01\x00')
-        data = sock.recv(2)
-        if len(data) != 2 or data != b'\x05\x00':
-            raise Exception("Invalid SOCKS5 handshake")
-        ping = (time.time() - start) * 1000
-        sock.close()
-        return (proxy_str, ping)
-    except Exception:
-        return (proxy_str, None)
-
-# --- Асинхронная проверка всех прокси ---
-async def check_proxies(proxy_list, timeout=5, max_concurrent=100):
-    if not proxy_list:
-        return []
-
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def check_one(proxy):
-        async with semaphore:
-            return await asyncio.to_thread(check_socks5_proxy, proxy, timeout)
-
-    tasks = [check_one(p) for p in proxy_list]
-    results = await asyncio.gather(*tasks)
-
-    good = [(p, ping) for p, ping in results if ping is not None]
-    good.sort(key=lambda x: x[1])
-    return good
-
-# --- Загрузка исходных прокси из файла ---
-def load_raw_proxies():
-    proxies_file = "proxies.txt"
-    try:
-        with open(proxies_file, 'r') as f:
-            proxies = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-        logger.info(f"Загружено {len(proxies)} прокси из {proxies_file}")
-        return proxies
-    except FileNotFoundError:
-        logger.warning(f"Файл {proxies_file} не найден. Боты будут работать без прокси.")
-        return []
-
-# --- Обновление отсортированного списка прокси ---
-async def update_sorted_proxies(force=False):
-    global last_proxy_check, cached_proxy_list
-    now = time.time()
-    if not force and cached_proxy_list is not None and (now - last_proxy_check) < PROXY_CACHE_TTL:
-        logger.info("Использую кэшированный список прокси")
-        return cached_proxy_list
-
-    raw_proxies = load_raw_proxies()
-    if not raw_proxies:
-        cached_proxy_list = []
-        last_proxy_check = now
-        return []
-
-    logger.info(f"Проверяю {len(raw_proxies)} прокси...")
-    good_proxies = await check_proxies(raw_proxies)
-    logger.info(f"Рабочих SOCKS5 прокси: {len(good_proxies)}")
-    if good_proxies:
-        top5 = [f"{p[0]} ({p[1]:.0f}ms)" for p in good_proxies[:5]]
-        logger.info(f"Лучшие прокси: {', '.join(top5)}")
-
-    try:
-        with open(PROXY_CACHE_FILE, 'w') as f:
-            for proxy, _ in good_proxies:
-                f.write(proxy + '\n')
-        if os.path.exists(PROXY_CACHE_FILE):
-            with open(PROXY_CACHE_FILE, 'r') as f:
-                lines = sum(1 for _ in f)
-            logger.info(f"Файл {PROXY_CACHE_FILE} записан, {lines} строк")
-        else:
-            logger.error(f"Не удалось создать файл {PROXY_CACHE_FILE}!")
-    except Exception as e:
-        logger.error(f"Ошибка записи {PROXY_CACHE_FILE}: {e}")
-
-    cached_proxy_list = [proxy for proxy, _ in good_proxies]
-    last_proxy_check = now
-    return cached_proxy_list
 
 # --- Проверка доступности node (с кэшем) ---
 def check_node():
@@ -181,10 +74,6 @@ async def launch_bot(update, ip, port, nick):
             await update.message.reply_text("❌ Ошибка: Node.js не найден на сервере.")
             return False
 
-        if not os.path.exists(PROXY_CACHE_FILE):
-            logger.warning(f"Файл {PROXY_CACHE_FILE} отсутствует! Боты будут без прокси.")
-            await update.message.reply_text("⚠️ Внимание: список прокси не найден. Боты будут подключаться напрямую (риск блокировки).")
-
         args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
 
         try:
@@ -211,7 +100,7 @@ async def wait_for_bot(nick, process):
             del active_bots[nick]
         logger.info(f"Бот {nick} удалён из списка активных")
 
-# --- Команды Telegram (без изменений, но /status исправлен) ---
+# --- Команды Telegram ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_html(
@@ -226,7 +115,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/stop_all — остановить всех ботов\n"
         "/list — список активных ботов (только ники)\n"
         "/status — подробный статус активных ботов\n"
-        "/refresh — принудительно обновить список прокси\n"
         "/cancel — отменить текущий диалог"
     )
 
@@ -334,11 +222,6 @@ async def status_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"**{nick}** — PID {data['process'].pid}, работает {uptime_str}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def refresh_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Обновляю список прокси... Это может занять до минуты.")
-    await update_sorted_proxies(force=True)
-    await update.message.reply_text(f"✅ Список обновлён. Рабочих SOCKS5 прокси: {len(cached_proxy_list)}")
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_data:
@@ -410,11 +293,6 @@ def main():
     else:
         logger.info("Node.js доступен, всё готово к работе.")
 
-    # Фоновая проверка прокси при отсутствии файла
-    if not os.path.exists(PROXY_CACHE_FILE):
-        logger.info("Файл прокси отсутствует, запускаю фоновую проверку...")
-        asyncio.create_task(update_sorted_proxies(force=True))
-
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -424,7 +302,6 @@ def main():
     app.add_handler(CommandHandler("stop_all", stop_all))
     app.add_handler(CommandHandler("list", list_bots))
     app.add_handler(CommandHandler("status", status_bots))
-    app.add_handler(CommandHandler("refresh", refresh_proxies))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
