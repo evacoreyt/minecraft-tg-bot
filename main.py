@@ -116,11 +116,9 @@ async def update_sorted_proxies(force=False):
     good_proxies = await check_proxies(raw_proxies)
     logger.info(f"Рабочих прокси: {len(good_proxies)}")
     if good_proxies:
-        # Выводим топ-5 для информации
         top5 = [f"{p[0]} ({p[1]:.0f}ms)" for p in good_proxies[:5]]
         logger.info(f"Лучшие прокси: {', '.join(top5)}")
 
-    # Сохраняем в файл только адреса (без пингов)
     with open(PROXY_CACHE_FILE, 'w') as f:
         for proxy, _ in good_proxies:
             f.write(proxy + '\n')
@@ -231,7 +229,7 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Количество должно быть числом.")
         return
 
-    if count < 1 or count > 1000:  # изменено с 100 на 1000
+    if count < 1 or count > 1000:
         await update.message.reply_text("Количество должно быть от 1 до 1000.")
         return
 
@@ -240,7 +238,6 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Префикс может содержать только буквы, цифры и символ подчёркивания.")
         return
 
-    # Формируем имена
     nicks = []
     for i in range(1, count + 1):
         nick = f"{prefix}_{i:02d}" if count > 9 else f"{prefix}_{i}"
@@ -386,8 +383,8 @@ def main():
     else:
         logger.info("Node.js доступен, всё готово к работе.")
 
-    # Запускаем асинхронную проверку прокси при старте (не блокируя)
-    asyncio.create_task(update_sorted_proxies())
+    # ⚠️ УДАЛЕНА ОШИБОЧНАЯ СТРОКА: asyncio.create_task(update_sorted_proxies())
+    # Теперь обновление прокси выполняется только по команде /refresh
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
