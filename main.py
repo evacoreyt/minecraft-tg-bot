@@ -1,7 +1,9 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
+# Автоматическая проверка и сортировка прокси по пингу, поддержка до 1000 ботов,
+# кэширование результатов, команда /refresh_proxies
 # Добавлены: лимит ботов, семафор запуска, увеличенная задержка,
-# кэш проверки Node.js, увеличен таймаут проверки
+# кэш проверки Node.js, улучшенная запись прокси, предупреждение при отсутствии файла
 
 import os
 import subprocess
@@ -42,7 +44,7 @@ cached_proxy_list = None
 
 # --- НОВЫЕ НАСТРОЙКИ ---
 MAX_BOTS = 100                     # Максимальное количество активных ботов
-bot_launch_semaphore = asyncio.Semaphore(10)   # Одновременно запускаем не более 10 ботов
+bot_launch_semaphore = asyncio.Semaphore(20)   # Одновременно запускаем не более 20 ботов
 _last_node_check = 0
 _node_check_result = False
 
@@ -104,7 +106,7 @@ def load_raw_proxies():
         logger.warning(f"Файл {proxies_file} не найден. Боты будут работать без прокси.")
         return []
 
-# --- Обновление отсортированного списка прокси ---
+# --- Обновление отсортированного списка прокси (с проверкой записи) ---
 async def update_sorted_proxies(force=False):
     global last_proxy_check, cached_proxy_list
     now = time.time()
@@ -125,9 +127,20 @@ async def update_sorted_proxies(force=False):
         top5 = [f"{p[0]} ({p[1]:.0f}ms)" for p in good_proxies[:5]]
         logger.info(f"Лучшие прокси: {', '.join(top5)}")
 
-    with open(PROXY_CACHE_FILE, 'w') as f:
-        for proxy, _ in good_proxies:
-            f.write(proxy + '\n')
+    # Запись файла с обработкой ошибок
+    try:
+        with open(PROXY_CACHE_FILE, 'w') as f:
+            for proxy, _ in good_proxies:
+                f.write(proxy + '\n')
+        # Проверяем, что файл создан
+        if os.path.exists(PROXY_CACHE_FILE):
+            with open(PROXY_CACHE_FILE, 'r') as f:
+                lines = sum(1 for _ in f)
+            logger.info(f"Файл {PROXY_CACHE_FILE} записан, {lines} строк")
+        else:
+            logger.error(f"Не удалось создать файл {PROXY_CACHE_FILE}!")
+    except Exception as e:
+        logger.error(f"Ошибка записи {PROXY_CACHE_FILE}: {e}")
 
     cached_proxy_list = [proxy for proxy, _ in good_proxies]
     last_proxy_check = now
@@ -162,7 +175,7 @@ def check_node():
     _last_node_check = now
     return _node_check_result
 
-# --- Вспомогательная функция для запуска бота ---
+# --- Вспомогательная функция для запуска бота (с предупреждением о прокси) ---
 async def launch_bot(update, ip, port, nick):
     """Запускает Minecraft-бота. Прокси управляются внутри minecraft_bot.js (из sorted_proxies.txt)."""
     async with bot_launch_semaphore:
@@ -173,6 +186,11 @@ async def launch_bot(update, ip, port, nick):
         if not check_node():
             await update.message.reply_text("❌ Ошибка: Node.js не найден на сервере. Сообщи администратору.")
             return False
+
+        # Проверяем наличие файла прокси
+        if not os.path.exists(PROXY_CACHE_FILE):
+            logger.warning(f"Файл {PROXY_CACHE_FILE} отсутствует! Боты будут без прокси.")
+            await update.message.reply_text("⚠️ Внимание: список прокси не найден. Боты будут подключаться напрямую (риск блокировки).")
 
         args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
 
@@ -394,7 +412,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for nick in nicks:
             if await launch_bot(update, state['ip'], port, nick):
                 success += 1
-            await asyncio.sleep(2)  # увеличенная задержка между запусками
+            await asyncio.sleep(1)  # задержка между запусками
         await update.message.reply_text(
             f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
         )
