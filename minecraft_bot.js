@@ -12,10 +12,14 @@ try {
 
 // ---------- Настройки ----------
 const PROXY_FILE = path.join(__dirname, 'proxies.txt');
-const MAX_RECONNECT_ATTEMPTS = 30; // сколько раз перебирать прокси
+const RECONNECT_DELAY = 10000;   // 10 секунд между попытками
+const MAX_RECONNECT_ATTEMPTS = 50; // максимальное число попыток
 
-let proxyList = [];         // массив строк socks5://...
-let currentProxyIndex = 0;  // индекс текущего прокси
+let proxyList = [];
+let currentProxyIndex = 0;
+let reconnectAttempts = 0;
+let shouldReconnect = true;  // флаг, который сбрасывается при получении SIGTERM
+let isConnected = false;      // чтобы не переподключаться, если уже успешно зашли
 
 // Загружаем список прокси из файла
 function loadProxyList() {
@@ -34,7 +38,7 @@ function loadProxyList() {
     }
 }
 
-// Выбирает следующий прокси (по кругу) и увеличивает индекс
+// Выбирает следующий прокси (по кругу)
 function getNextProxy() {
     if (proxyList.length === 0) return null;
     const proxy = proxyList[currentProxyIndex % proxyList.length];
@@ -42,7 +46,7 @@ function getNextProxy() {
     return proxy;
 }
 
-// Создаёт бота с указанным прокси (или без)
+// Создаёт бота с указанным прокси
 function createBotWithProxy(proxyUrl) {
     const serverIp = process.argv[2];
     const serverPort = parseInt(process.argv[3]) || 25565;
@@ -101,70 +105,95 @@ function createBotWithProxy(proxyUrl) {
     return mineflayer.createBot(options);
 }
 
-// Основная функция с reconnect-логикой
 function startBot() {
-    let attemptCount = 0;
-
-    function tryConnect() {
-        attemptCount++;
-        const proxy = proxyList.length ? getNextProxy() : null;
-        const bot = createBotWithProxy(proxy);
-
-        if (!bot) {
-            // Ошибка создания бота (например, неверный прокси) – сразу следующая попытка
-            if (attemptCount >= MAX_RECONNECT_ATTEMPTS) {
-                console.log(`❌ Превышено максимальное число попыток (${MAX_RECONNECT_ATTEMPTS}). Завершение.`);
-                process.exit(1);
-            }
-            setTimeout(tryConnect, 2000);
-            return;
-        }
-
-        let isConnected = false;
-
-        bot.on('login', () => {
-            isConnected = true;
-            console.log(`✅ Бот ${bot.username} успешно подключился к серверу!`);
-        });
-
-        bot.on('spawn', () => {
-            console.log(`🌟 Бот ${bot.username} появился в мире!`);
-        });
-
-        bot.on('kicked', (reason) => {
-            console.log(`❌ Бот ${bot.username} был кикнут. Причина: ${reason}`);
-            disconnectAndReconnect();
-        });
-
-        bot.on('error', (err) => {
-            console.log(`⚠️ Ошибка у бота ${bot.username}:`, err.message);
-            disconnectAndReconnect();
-        });
-
-        bot.on('end', (reason) => {
-            if (!isConnected) {
-                console.log(`🔌 Бот ${bot.username} отключился до завершения подключения. Причина: ${reason || 'неизвестна'}`);
-                disconnectAndReconnect();
-            } else {
-                console.log(`🔌 Бот ${bot.username} отключился от сервера. Причина: ${reason || 'неизвестна'}`);
-                // Если уже был подключён, можно завершить процесс, но можно и переподключиться
-                // Для стабильности лучше завершить, чтобы Python-бот не держал процесс
-                process.exit(0);
-            }
-        });
-
-        function disconnectAndReconnect() {
-            if (bot._client) bot._client.end();
-            if (attemptCount >= MAX_RECONNECT_ATTEMPTS) {
-                console.log(`❌ Превышено максимальное число попыток (${MAX_RECONNECT_ATTEMPTS}). Завершение.`);
-                process.exit(1);
-            }
-            setTimeout(tryConnect, 3000); // пауза перед следующей попыткой
-        }
-    }
-
+    reconnectAttempts = 0;
     tryConnect();
 }
+
+function tryConnect() {
+    if (!shouldReconnect) {
+        console.log('🛑 Получен сигнал завершения, выходим без reconnect');
+        process.exit(0);
+    }
+
+    reconnectAttempts++;
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.log(`❌ Превышено максимальное число попыток (${MAX_RECONNECT_ATTEMPTS}). Завершение.`);
+        process.exit(1);
+    }
+
+    const proxy = proxyList.length ? getNextProxy() : null;
+    const bot = createBotWithProxy(proxy);
+
+    if (!bot) {
+        // Ошибка создания бота – сразу следующая попытка
+        setTimeout(tryConnect, RECONNECT_DELAY);
+        return;
+    }
+
+    let alreadyConnected = false;
+
+    bot.on('login', () => {
+        isConnected = true;
+        alreadyConnected = true;
+        console.log(`✅ Бот ${bot.username} успешно подключился к серверу!`);
+        // Сбрасываем счётчик попыток при успехе
+        reconnectAttempts = 0;
+    });
+
+    bot.on('spawn', () => {
+        console.log(`🌟 Бот ${bot.username} появился в мире!`);
+    });
+
+    bot.on('kicked', (reason) => {
+        console.log(`❌ Бот ${bot.username} был кикнут. Причина: ${reason}`);
+        disconnectAndReconnect();
+    });
+
+    bot.on('error', (err) => {
+        console.log(`⚠️ Ошибка у бота ${bot.username}:`, err.message);
+        // Некоторые ошибки (например, ECONNREFUSED) не требуют reconnect, если они случились до логина
+        if (!alreadyConnected) {
+            disconnectAndReconnect();
+        } else {
+            // Если уже был подключён, а потом ошибка – возможно, сервер упал, переподключаемся
+            disconnectAndReconnect();
+        }
+    });
+
+    bot.on('end', (reason) => {
+        console.log(`🔌 Бот ${bot.username} отключился от сервера. Причина: ${reason || 'неизвестна'}`);
+        if (alreadyConnected) {
+            // Если бот уже был в игре, значит он вышел нормально (или его кикнуло, но это обработано выше)
+            // В любом случае, если reconnect разрешён, пробуем переподключиться
+            if (shouldReconnect) {
+                disconnectAndReconnect();
+            } else {
+                process.exit(0);
+            }
+        } else {
+            // Не успел подключиться – пробуем другой прокси
+            disconnectAndReconnect();
+        }
+    });
+
+    function disconnectAndReconnect() {
+        if (bot._client) bot._client.end();
+        if (shouldReconnect) {
+            setTimeout(tryConnect, RECONNECT_DELAY);
+        } else {
+            process.exit(0);
+        }
+    }
+}
+
+// Обработка сигнала завершения (SIGTERM) – приходит от Python при остановке бота
+process.on('SIGTERM', () => {
+    console.log('Получен SIGTERM, отключаю reconnect');
+    shouldReconnect = false;
+    // Можно не выходить сразу, дадим время завершиться
+    setTimeout(() => process.exit(0), 1000);
+});
 
 // Загружаем прокси и стартуем
 loadProxyList();
