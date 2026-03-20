@@ -1,12 +1,13 @@
 // ===== minecraft_bot.js =====
-// Minecraft-бот с автоопределением версии сервера и подробным логированием
+// Minecraft-бот с автоопределением версии и поддержкой SOCKS5-прокси
 
 const mineflayer = require('mineflayer');
 
-// Получаем параметры из командной строки (их передаёт main.py)
+// Получаем параметры из командной строки
 const serverIp = process.argv[2];
 const serverPort = parseInt(process.argv[3]) || 25565;
 const botName = process.argv[4] || 'MineBot';
+const proxyArg = process.argv[5]; // пятый аргумент – прокси
 
 if (!serverIp) {
     console.log('❌ Ошибка: Не указан IP сервера!');
@@ -15,45 +16,66 @@ if (!serverIp) {
 
 console.log(`🤖 Запускаю бота ${botName} для подключения к ${serverIp}:${serverPort}...`);
 
-// Создаём бота БЕЗ указания версии — она определится автоматически
-const bot = mineflayer.createBot({
+let options = {
     host: serverIp,
     port: serverPort,
     username: botName,
-    auth: 'offline' // для пиратских серверов. Если нужен лицензионный — замени на 'microsoft'
-});
+    auth: 'offline' // для пиратских серверов
+};
 
-// Событие при успешном входе на сервер
+// Подключаем прокси, если передан
+if (proxyArg) {
+    const socks = require('socks');
+    const proxyUrl = new URL(proxyArg);
+    const proxy = {
+        host: proxyUrl.hostname,
+        port: parseInt(proxyUrl.port),
+        type: 5
+    };
+    if (proxyUrl.username && proxyUrl.password) {
+        proxy.userId = proxyUrl.username;
+        proxy.password = proxyUrl.password;
+    }
+    console.log(`🌐 Использую прокси ${proxy.host}:${proxy.port}`);
+    options.connect = (client) => {
+        socks.createConnection({
+            proxy: proxy,
+            command: 'connect',
+            destination: {
+                host: serverIp,
+                port: serverPort
+            }
+        }, (err, info) => {
+            if (err) {
+                console.log('❌ Ошибка прокси:', err);
+                return;
+            }
+            client.setSocket(info.socket);
+            client.emit('connect');
+        });
+    };
+}
+
+const bot = mineflayer.createBot(options);
+
 bot.on('login', () => {
     console.log(`✅ Бот ${botName} успешно подключился к серверу!`);
-    // Выводим версию, которую определил Mineflayer
-    console.log(`🌐 Версия сервера (автоопределение): ${bot.version || 'неизвестно'}`);
 });
 
-// Событие, когда бот появляется в мире (загрузился)
 bot.on('spawn', () => {
     console.log(`🌟 Бот ${botName} появился в мире!`);
 });
 
-// Событие при кике с сервера (самое важное для диагностики)
 bot.on('kicked', (reason) => {
     console.log(`❌ Бот ${botName} был кикнут. Причина: ${reason}`);
-    process.exit(1); // Завершаем процесс, чтобы Railway показал ошибку
+    process.exit(1);
 });
 
-// Событие при ошибке соединения или протокола
 bot.on('error', (err) => {
     console.log(`⚠️ Ошибка у бота ${botName}:`, err.message);
-    // Не завершаем процесс сразу, возможно, ошибка временная
 });
 
-// Событие при отключении от сервера (нормальное или из-за ошибки)
 bot.on('end', (reason) => {
     console.log(`🔌 Бот ${botName} отключился от сервера. Причина: ${reason || 'неизвестна'}`);
-    process.exit(0); // Завершаем процесс чисто
-});
-
-// Дополнительно: логируем всё, что бот говорит в чат (для отладки)
-bot.on('message', (message) => {
-    console.log(`[ЧАТ] ${message}`);
+    process.exit(0);
 });
