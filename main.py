@@ -1,5 +1,6 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
+# Версия с автоопределением версии сервера и улучшенным логированием
 
 import os
 import subprocess
@@ -107,7 +108,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = user_data[user_id]['port']
 
         await update.message.reply_text(
-            f"⚡ Запускаю бота с ником **{nick}** для подключения к **{ip}:{port}**... Это может занять несколько секунд."
+            f"⚡ Запускаю бота с ником **{nick}** для подключения к **{ip}:{port}**...\n"
+            f"Следи за логами на Railway, чтобы увидеть результат."
         )
 
         # Проверяем наличие node перед запуском
@@ -118,38 +120,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_data[user_id]
             return
 
-        # Запускаем Node.js скрипт
+        # Запускаем Node.js скрипт в фоновом режиме (логи уходят в Railway)
         try:
-            # Используем /usr/bin/env для поиска node в PATH
             process = subprocess.Popen(
                 ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+                stdout=None,  # перенаправляем в stdout родителя
+                stderr=None   # чтобы видеть логи в Railway
             )
-
-            # Ждём завершения (таймаут 5 секунд)
-            try:
-                stdout, stderr = process.communicate(timeout=5)
-                if process.returncode == 0:
-                    await update.message.reply_text(
-                        f"✅ Бот **{nick}** успешно запущен и подключился к серверу!\n"
-                        f"```\n{stdout}\n```"
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"❌ Не удалось запустить бота. Ошибка:\n```\n{stderr}\n```"
-                    )
-            except subprocess.TimeoutExpired:
-                # Если процесс не завершился за 5 секунд, значит он работает в фоне
-                process.kill()  # убиваем, чтобы не завис
-                await update.message.reply_text(
-                    f"✅ Бот **{nick}** запущен и работает в фоновом режиме! Проверь сервер."
-                )
-
+            # Отправляем пользователю подтверждение
+            await update.message.reply_text(
+                f"✅ Бот **{nick}** запущен и подключается к серверу **{ip}:{port}**.\n"
+                f"Подробности смотри в логах Railway (вкладка Logs)."
+            )
         except Exception as e:
-            logger.exception("Ошибка при запуске Node.js процесса")
-            await update.message.reply_text(f"❌ Критическая ошибка: {e}")
+            await update.message.reply_text(f"❌ Ошибка при запуске бота: {e}")
 
         # Очищаем данные пользователя
         del user_data[user_id]
