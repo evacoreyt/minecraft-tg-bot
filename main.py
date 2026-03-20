@@ -2,6 +2,7 @@
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
 # Автоматическая проверка и сортировка прокси по пингу, поддержка до 1000 ботов,
 # кэширование результатов, команда /refresh_proxies
+# Добавлены: лимит ботов, семафор запуска, увеличенная задержка, логирование кода завершения
 
 import os
 import subprocess
@@ -39,6 +40,10 @@ PROXY_CACHE_FILE = "sorted_proxies.txt"
 PROXY_CACHE_TTL = 300  # 5 минут
 last_proxy_check = 0
 cached_proxy_list = None
+
+# --- НОВЫЕ НАСТРОЙКИ ---
+MAX_BOTS = 100                     # Максимальное количество активных ботов
+bot_launch_semaphore = asyncio.Semaphore(20)   # Одновременно запускаем не более 20 ботов
 
 # --- Функция проверки пинга одного прокси ---
 def ping_proxy(proxy_str, timeout=5):
@@ -146,50 +151,52 @@ def check_node():
         logger.error(f"Ошибка при проверке node: {e}")
         return False
 
-# --- Вспомогательная функция для запуска бота (без прокси, только IP, порт, ник) ---
+# --- Вспомогательная функция для запуска бота (с семафором и лимитом) ---
 async def launch_bot(update, ip, port, nick):
     """Запускает Minecraft-бота. Прокси управляются внутри minecraft_bot.js (из sorted_proxies.txt)."""
-    if nick in active_bots:
-        await update.message.reply_text(f"❌ Бот с ником **{nick}** уже запущен. Используй другой ник.")
-        return False
+    async with bot_launch_semaphore:
+        if nick in active_bots:
+            await update.message.reply_text(f"❌ Бот с ником **{nick}** уже запущен. Используй другой ник.")
+            return False
 
-    if not check_node():
-        await update.message.reply_text("❌ Ошибка: Node.js не найден на сервере. Сообщи администратору.")
-        return False
+        if not check_node():
+            await update.message.reply_text("❌ Ошибка: Node.js не найден на сервере. Сообщи администратору.")
+            return False
 
-    args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
+        args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
 
-    try:
-        process = subprocess.Popen(
-            args,
-            stdout=None,
-            stderr=None
-        )
-        active_bots[nick] = {
-            'process': process,
-            'start_time': time.time()
-        }
-        asyncio.create_task(wait_for_bot(nick, process))
+        try:
+            process = subprocess.Popen(
+                args,
+                stdout=None,
+                stderr=None
+            )
+            active_bots[nick] = {
+                'process': process,
+                'start_time': time.time()
+            }
+            asyncio.create_task(wait_for_bot(nick, process))
 
-        await update.message.reply_text(
-            f"✅ Бот **{nick}** запущен.\nПодключается к **{ip}:{port}**.\nПодробности в логах Railway."
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при запуске бота {nick}: {e}")
-        await update.message.reply_text(f"❌ Ошибка при запуске бота {nick}: {e}")
-        return False
+            await update.message.reply_text(
+                f"✅ Бот **{nick}** запущен.\nПодключается к **{ip}:{port}**.\nПодробности в логах Railway."
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при запуске бота {nick}: {e}")
+            await update.message.reply_text(f"❌ Ошибка при запуске бота {nick}: {e}")
+            return False
 
 async def wait_for_bot(nick, process):
     """Ждёт завершения процесса и удаляет бота из списка активных."""
     try:
-        await asyncio.to_thread(process.wait)
+        returncode = await asyncio.to_thread(process.wait)
+        logger.info(f"Бот {nick} завершился с кодом {returncode}")
     except Exception as e:
         logger.error(f"Ошибка при ожидании процесса {nick}: {e}")
     finally:
         if nick in active_bots:
             del active_bots[nick]
-        logger.info(f"Бот {nick} завершён")
+        logger.info(f"Бот {nick} удалён из списка активных")
 
 # --- Команды Telegram ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -236,6 +243,14 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefix = args[1] if len(args) > 1 else "Astral"
     if not prefix.replace('_', '').isalnum():
         await update.message.reply_text("Префикс может содержать только буквы, цифры и символ подчёркивания.")
+        return
+
+    # Проверка лимита активных ботов
+    if len(active_bots) + count > MAX_BOTS:
+        await update.message.reply_text(
+            f"❌ Превышен лимит активных ботов ({MAX_BOTS}). Сейчас активно {len(active_bots)}.\n"
+            "Используйте /stop_all или подождите, пока некоторые боты завершатся."
+        )
         return
 
     nicks = []
@@ -368,6 +383,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for nick in nicks:
             if await launch_bot(update, state['ip'], port, nick):
                 success += 1
+            await asyncio.sleep(1)  # Задержка между запусками (увеличена с 0.5 до 1 секунды)
         await update.message.reply_text(
             f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
         )
@@ -382,9 +398,6 @@ def main():
         logger.error("Node.js не доступен! Бот не сможет запускать Minecraft-ботов.")
     else:
         logger.info("Node.js доступен, всё готово к работе.")
-
-    # ⚠️ УДАЛЕНА ОШИБОЧНАЯ СТРОКА: asyncio.create_task(update_sorted_proxies())
-    # Теперь обновление прокси выполняется только по команде /refresh
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
