@@ -1,8 +1,7 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
-# Автоматическая проверка и сортировка прокси по пингу, поддержка до 1000 ботов,
-# кэширование результатов, команда /refresh_proxies
-# Добавлены: лимит ботов, семафор запуска, увеличенная задержка, логирование кода завершения
+# Добавлены: лимит ботов, семафор запуска, увеличенная задержка,
+# кэш проверки Node.js, увеличен таймаут проверки
 
 import os
 import subprocess
@@ -43,7 +42,9 @@ cached_proxy_list = None
 
 # --- НОВЫЕ НАСТРОЙКИ ---
 MAX_BOTS = 100                     # Максимальное количество активных ботов
-bot_launch_semaphore = asyncio.Semaphore(20)   # Одновременно запускаем не более 20 ботов
+bot_launch_semaphore = asyncio.Semaphore(10)   # Одновременно запускаем не более 10 ботов
+_last_node_check = 0
+_node_check_result = False
 
 # --- Функция проверки пинга одного прокси ---
 def ping_proxy(proxy_str, timeout=5):
@@ -132,26 +133,36 @@ async def update_sorted_proxies(force=False):
     last_proxy_check = now
     return cached_proxy_list
 
-# --- Проверка доступности node ---
+# --- Проверка доступности node (с кэшем) ---
 def check_node():
+    global _last_node_check, _node_check_result
+    now = time.time()
+    # Кэшируем результат на 10 секунд, чтобы не вызывать часто
+    if now - _last_node_check < 10:
+        return _node_check_result
     try:
         result = subprocess.run(
             ['/usr/bin/env', 'node', '--version'],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=15  # увеличенный таймаут
         )
         if result.returncode == 0:
             logger.info(f"Node.js установлен: {result.stdout.strip()}")
-            return True
+            _node_check_result = True
         else:
             logger.error("Node.js не отвечает корректно")
-            return False
+            _node_check_result = False
+    except subprocess.TimeoutExpired:
+        logger.error("Проверка Node.js превысила таймаут 15 секунд")
+        _node_check_result = False
     except Exception as e:
         logger.error(f"Ошибка при проверке node: {e}")
-        return False
+        _node_check_result = False
+    _last_node_check = now
+    return _node_check_result
 
-# --- Вспомогательная функция для запуска бота (с семафором и лимитом) ---
+# --- Вспомогательная функция для запуска бота ---
 async def launch_bot(update, ip, port, nick):
     """Запускает Minecraft-бота. Прокси управляются внутри minecraft_bot.js (из sorted_proxies.txt)."""
     async with bot_launch_semaphore:
@@ -383,7 +394,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for nick in nicks:
             if await launch_bot(update, state['ip'], port, nick):
                 success += 1
-            await asyncio.sleep(1)  # Задержка между запусками (увеличена с 0.5 до 1 секунды)
+            await asyncio.sleep(2)  # увеличенная задержка между запусками
         await update.message.reply_text(
             f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
         )
