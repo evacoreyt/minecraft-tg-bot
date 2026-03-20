@@ -12,13 +12,17 @@ try {
 
 // ---------- Настройки ----------
 const PROXY_FILE = path.join(__dirname, 'sorted_proxies.txt');
-const RECONNECT_DELAY = 1000;   // 1 секунда между попытками
-const MAX_RECONNECT_ATTEMPTS = 100; // максимальное число попыток (чтобы не зациклиться)
+const RECONNECT_DELAY = 5000;       // 5 секунд между попытками
+const MAX_RECONNECT_ATTEMPTS = 20;  // максимальное число попыток
+const CONNECTION_TIMEOUT = 30000;   // 30 секунд таймаут подключения
 
 let proxyList = [];
 let currentProxyIndex = 0;
 let shouldReconnect = true;
 let reconnectAttempts = 0;
+let loginSuccess = false;
+let currentBot = null;
+let loginTimeout = null;
 
 // Загружаем список прокси из файла
 function loadProxyList() {
@@ -104,9 +108,6 @@ function createBotWithProxy(proxyUrl) {
     return mineflayer.createBot(options);
 }
 
-let currentBot = null;
-let loginSuccess = false;
-
 function attemptConnect() {
     if (!shouldReconnect) {
         console.log('🛑 Получен сигнал завершения, выходим без reconnect');
@@ -131,7 +132,17 @@ function attemptConnect() {
     loginSuccess = false;
     currentBot = bot;
 
+    // Устанавливаем таймаут на подключение
+    loginTimeout = setTimeout(() => {
+        if (!loginSuccess) {
+            console.log('❌ Таймаут подключения (30 сек)');
+            if (bot && bot._client) bot._client.end();
+            process.exit(1);
+        }
+    }, CONNECTION_TIMEOUT);
+
     bot.on('login', () => {
+        clearTimeout(loginTimeout);
         loginSuccess = true;
         reconnectAttempts = 0; // сбрасываем счётчик при успехе
         console.log(`✅ Бот ${bot.username} успешно подключился к серверу!`);
