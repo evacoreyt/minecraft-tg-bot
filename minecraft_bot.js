@@ -11,10 +11,10 @@ try {
 }
 
 // ---------- Настройки ----------
-const PROXY_FILE = path.join(__dirname, 'sorted_proxies.txt');
-const RECONNECT_DELAY = 10000;      // 10 секунд между попытками
-const MAX_RECONNECT_ATTEMPTS = 15;   // максимальное число попыток
-const CONNECTION_TIMEOUT = 45000;    // 45 секунд таймаут подключения
+const PROXY_FILE = path.join(__dirname, 'proxies.txt');      // ← читаем напрямую
+const RECONNECT_DELAY = 5000;       // 5 секунд между попытками
+const MAX_RECONNECT_ATTEMPTS = 20;  // максимальное число попыток
+const CONNECTION_TIMEOUT = 30000;   // 30 секунд таймаут подключения
 
 let proxyList = [];
 let currentProxyIndex = 0;
@@ -24,7 +24,7 @@ let loginSuccess = false;
 let currentBot = null;
 let loginTimeout = null;
 
-// Загружаем список прокси из файла
+// Загружаем список прокси из файла proxies.txt
 function loadProxyList() {
     try {
         const content = fs.readFileSync(PROXY_FILE, 'utf8');
@@ -72,7 +72,7 @@ function createBotWithProxy(proxyUrl) {
                 host: parsed.hostname,
                 port: parseInt(parsed.port),
                 type: 5,
-                timeout: 30000  // таймаут для socks-соединения (30 сек)
+                timeout: 30000
             };
             if (parsed.username && parsed.password) {
                 proxyConfig.userId = parsed.username;
@@ -92,7 +92,7 @@ function createBotWithProxy(proxyUrl) {
                     host: serverIp,
                     port: serverPort
                 },
-                timeout: 30000   // таймаут для самого соединения
+                timeout: 30000
             }, (err, info) => {
                 if (err) {
                     console.log(`❌ Ошибка прокси: ${err.message}`);
@@ -126,7 +126,6 @@ function attemptConnect() {
     const bot = createBotWithProxy(proxy);
 
     if (!bot) {
-        // Ошибка создания бота – сразу следующая попытка
         setTimeout(attemptConnect, RECONNECT_DELAY);
         return;
     }
@@ -134,10 +133,9 @@ function attemptConnect() {
     loginSuccess = false;
     currentBot = bot;
 
-    // Устанавливаем таймаут на подключение
     loginTimeout = setTimeout(() => {
         if (!loginSuccess) {
-            console.log('❌ Таймаут подключения (45 сек)');
+            console.log('❌ Таймаут подключения (30 сек)');
             if (bot && bot._client) bot._client.end();
             process.exit(1);
         }
@@ -146,7 +144,7 @@ function attemptConnect() {
     bot.on('login', () => {
         clearTimeout(loginTimeout);
         loginSuccess = true;
-        reconnectAttempts = 0; // сбрасываем счётчик при успехе
+        reconnectAttempts = 0;
         console.log(`✅ Бот ${bot.username} успешно подключился к серверу!`);
     });
 
@@ -162,10 +160,8 @@ function attemptConnect() {
     bot.on('error', (err) => {
         console.log(`⚠️ Ошибка у бота ${bot.username}:`, err.message);
         if (!loginSuccess) {
-            // Если ещё не залогинились, пробуем другой прокси
             disconnectAndReconnect();
         } else {
-            // Если уже был в игре, возможно, ошибка фатальная, выходим
             console.log('❌ Критическая ошибка после входа, завершение');
             process.exit(1);
         }
@@ -174,10 +170,8 @@ function attemptConnect() {
     bot.on('end', (reason) => {
         console.log(`🔌 Бот ${bot.username} отключился от сервера. Причина: ${reason || 'неизвестна'}`);
         if (!loginSuccess) {
-            // Не успел подключиться – пробуем другой прокси
             disconnectAndReconnect();
         } else {
-            // Если уже был в игре, значит, отключился нормально – выходим
             process.exit(0);
         }
     });
@@ -192,7 +186,6 @@ function disconnectAndReconnect() {
     }
 }
 
-// Обработка сигнала завершения (SIGTERM) – приходит от Python при остановке
 process.on('SIGTERM', () => {
     console.log('Получен SIGTERM, отключаю reconnect');
     shouldReconnect = false;
@@ -200,6 +193,5 @@ process.on('SIGTERM', () => {
     setTimeout(() => process.exit(0), 1000);
 });
 
-// Загружаем прокси и стартуем
 loadProxyList();
 attemptConnect();
