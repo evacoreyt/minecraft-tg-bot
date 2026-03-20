@@ -12,9 +12,9 @@ try {
 
 // ---------- Настройки ----------
 const PROXY_FILE = path.join(__dirname, 'sorted_proxies.txt');
-const RECONNECT_DELAY = 5000;       // 5 секунд между попытками
-const MAX_RECONNECT_ATTEMPTS = 20;  // максимальное число попыток
-const CONNECTION_TIMEOUT = 30000;   // 30 секунд таймаут подключения
+const RECONNECT_DELAY = 10000;      // 10 секунд между попытками
+const MAX_RECONNECT_ATTEMPTS = 15;   // максимальное число попыток
+const CONNECTION_TIMEOUT = 45000;    // 45 секунд таймаут подключения
 
 let proxyList = [];
 let currentProxyIndex = 0;
@@ -71,7 +71,8 @@ function createBotWithProxy(proxyUrl) {
             proxyConfig = {
                 host: parsed.hostname,
                 port: parseInt(parsed.port),
-                type: 5
+                type: 5,
+                timeout: 30000  // таймаут для socks-соединения (30 сек)
             };
             if (parsed.username && parsed.password) {
                 proxyConfig.userId = parsed.username;
@@ -90,7 +91,8 @@ function createBotWithProxy(proxyUrl) {
                 destination: {
                     host: serverIp,
                     port: serverPort
-                }
+                },
+                timeout: 30000   // таймаут для самого соединения
             }, (err, info) => {
                 if (err) {
                     console.log(`❌ Ошибка прокси: ${err.message}`);
@@ -135,7 +137,7 @@ function attemptConnect() {
     // Устанавливаем таймаут на подключение
     loginTimeout = setTimeout(() => {
         if (!loginSuccess) {
-            console.log('❌ Таймаут подключения (30 сек)');
+            console.log('❌ Таймаут подключения (45 сек)');
             if (bot && bot._client) bot._client.end();
             process.exit(1);
         }
