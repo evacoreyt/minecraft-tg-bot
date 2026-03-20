@@ -1,5 +1,7 @@
 // minecraft_bot.js
 const mineflayer = require('mineflayer');
+const fs = require('fs');
+const path = require('path');
 let socksClient;
 try {
     socksClient = require('socks').SocksClient;
@@ -8,88 +10,183 @@ try {
     socksClient = null;
 }
 
-const serverIp = process.argv[2];
-const serverPort = parseInt(process.argv[3]) || 25565;
-const botName = process.argv[4] || 'MineBot';
-const proxyArg = process.argv[5];  // пятый аргумент – прокси (если передан)
+// ---------- Настройки ----------
+const PROXY_FILE = path.join(__dirname, 'sorted_proxies.txt');
+const RECONNECT_DELAY = 1000;   // 1 секунда между попытками
+const MAX_RECONNECT_ATTEMPTS = 100; // максимальное число попыток (чтобы не зациклиться)
 
-if (!serverIp) {
-    console.log('❌ Ошибка: Не указан IP сервера!');
-    process.exit(1);
+let proxyList = [];
+let currentProxyIndex = 0;
+let shouldReconnect = true;
+let reconnectAttempts = 0;
+
+// Загружаем список прокси из файла
+function loadProxyList() {
+    try {
+        const content = fs.readFileSync(PROXY_FILE, 'utf8');
+        proxyList = content.split('\n')
+            .map(line => line.trim())
+            .filter(line => line && !line.startsWith('#'));
+        console.log(`📄 Загружено ${proxyList.length} прокси из ${PROXY_FILE}`);
+        if (proxyList.length === 0) {
+            console.log('⚠️ Список прокси пуст, работаем без прокси');
+        }
+    } catch (err) {
+        console.log(`⚠️ Не удалось прочитать ${PROXY_FILE}: ${err.message}. Работаем без прокси`);
+        proxyList = [];
+    }
 }
 
-console.log(`🤖 Запускаю бота ${botName} для подключения к ${serverIp}:${serverPort}...`);
+// Выбирает следующий прокси (по кругу)
+function getNextProxy() {
+    if (proxyList.length === 0) return null;
+    const proxy = proxyList[currentProxyIndex % proxyList.length];
+    currentProxyIndex++;
+    return proxy;
+}
 
-let options = {
-    host: serverIp,
-    port: serverPort,
-    username: botName,
-    auth: 'offline'
-};
+// Создаёт бота с указанным прокси
+function createBotWithProxy(proxyUrl) {
+    const serverIp = process.argv[2];
+    const serverPort = parseInt(process.argv[3]) || 25565;
+    const botName = process.argv[4] || 'MineBot';
 
-// Если прокси передан и модуль socks доступен
-if (proxyArg && socksClient) {
-    let proxyConfig;
-    try {
-        const parsed = new URL(proxyArg);
-        proxyConfig = {
-            host: parsed.hostname,
-            port: parseInt(parsed.port),
-            type: 5
-        };
-        if (parsed.username && parsed.password) {
-            proxyConfig.userId = parsed.username;
-            proxyConfig.password = parsed.password;
+    console.log(`🤖 Попытка подключения бота ${botName} к ${serverIp}:${serverPort}...`);
+
+    let options = {
+        host: serverIp,
+        port: serverPort,
+        username: botName,
+        auth: 'offline'
+    };
+
+    if (proxyUrl && socksClient) {
+        let proxyConfig;
+        try {
+            const parsed = new URL(proxyUrl);
+            proxyConfig = {
+                host: parsed.hostname,
+                port: parseInt(parsed.port),
+                type: 5
+            };
+            if (parsed.username && parsed.password) {
+                proxyConfig.userId = parsed.username;
+                proxyConfig.password = parsed.password;
+            }
+        } catch (e) {
+            console.log(`❌ Неверный формат прокси: ${proxyUrl}`);
+            return null;
         }
-    } catch (e) {
-        console.log(`❌ Неверный формат прокси: ${proxyArg}`);
+        console.log(`🌐 Использую прокси ${proxyConfig.host}:${proxyConfig.port}`);
+
+        options.connect = (client) => {
+            socksClient.createConnection({
+                proxy: proxyConfig,
+                command: 'connect',
+                destination: {
+                    host: serverIp,
+                    port: serverPort
+                }
+            }, (err, info) => {
+                if (err) {
+                    console.log(`❌ Ошибка прокси: ${err.message}`);
+                    client.emit('error', err);
+                    return;
+                }
+                client.setSocket(info.socket);
+                client.emit('connect');
+            });
+        };
+    } else if (proxyUrl && !socksClient) {
+        console.log('❌ Модуль socks не загружен, прокси не будет использован');
+    }
+
+    return mineflayer.createBot(options);
+}
+
+let currentBot = null;
+let loginSuccess = false;
+
+function attemptConnect() {
+    if (!shouldReconnect) {
+        console.log('🛑 Получен сигнал завершения, выходим без reconnect');
+        process.exit(0);
+    }
+
+    reconnectAttempts++;
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.log(`❌ Превышено максимальное число попыток (${MAX_RECONNECT_ATTEMPTS}). Завершение.`);
         process.exit(1);
     }
-    console.log(`🌐 Использую прокси ${proxyConfig.host}:${proxyConfig.port}`);
 
-    options.connect = (client) => {
-        socksClient.createConnection({
-            proxy: proxyConfig,
-            command: 'connect',
-            destination: {
-                host: serverIp,
-                port: serverPort
-            }
-        }, (err, info) => {
-            if (err) {
-                console.log(`❌ Ошибка прокси: ${err.message}`);
-                client.emit('error', err);
-                return;
-            }
-            client.setSocket(info.socket);
-            client.emit('connect');
-        });
-    };
-} else if (proxyArg && !socksClient) {
-    console.log('❌ Модуль socks не загружен, прокси не будет использован');
+    const proxy = getNextProxy();
+    const bot = createBotWithProxy(proxy);
+
+    if (!bot) {
+        // Ошибка создания бота – сразу следующая попытка
+        setTimeout(attemptConnect, RECONNECT_DELAY);
+        return;
+    }
+
+    loginSuccess = false;
+    currentBot = bot;
+
+    bot.on('login', () => {
+        loginSuccess = true;
+        reconnectAttempts = 0; // сбрасываем счётчик при успехе
+        console.log(`✅ Бот ${bot.username} успешно подключился к серверу!`);
+    });
+
+    bot.on('spawn', () => {
+        console.log(`🌟 Бот ${bot.username} появился в мире!`);
+    });
+
+    bot.on('kicked', (reason) => {
+        console.log(`❌ Бот ${bot.username} был кикнут. Причина: ${reason}`);
+        disconnectAndReconnect();
+    });
+
+    bot.on('error', (err) => {
+        console.log(`⚠️ Ошибка у бота ${bot.username}:`, err.message);
+        if (!loginSuccess) {
+            // Если ещё не залогинились, пробуем другой прокси
+            disconnectAndReconnect();
+        } else {
+            // Если уже был в игре, возможно, ошибка фатальная, выходим
+            console.log('❌ Критическая ошибка после входа, завершение');
+            process.exit(1);
+        }
+    });
+
+    bot.on('end', (reason) => {
+        console.log(`🔌 Бот ${bot.username} отключился от сервера. Причина: ${reason || 'неизвестна'}`);
+        if (!loginSuccess) {
+            // Не успел подключиться – пробуем другой прокси
+            disconnectAndReconnect();
+        } else {
+            // Если уже был в игре, значит, отключился нормально – выходим
+            process.exit(0);
+        }
+    });
 }
 
-const bot = mineflayer.createBot(options);
+function disconnectAndReconnect() {
+    if (currentBot && currentBot._client) currentBot._client.end();
+    if (shouldReconnect) {
+        setTimeout(attemptConnect, RECONNECT_DELAY);
+    } else {
+        process.exit(0);
+    }
+}
 
-bot.on('login', () => {
-    console.log(`✅ Бот ${botName} успешно подключился к серверу!`);
+// Обработка сигнала завершения (SIGTERM) – приходит от Python при остановке
+process.on('SIGTERM', () => {
+    console.log('Получен SIGTERM, отключаю reconnect');
+    shouldReconnect = false;
+    if (currentBot && currentBot._client) currentBot._client.end();
+    setTimeout(() => process.exit(0), 1000);
 });
 
-bot.on('spawn', () => {
-    console.log(`🌟 Бот ${botName} появился в мире!`);
-});
-
-bot.on('kicked', (reason) => {
-    console.log(`❌ Бот ${botName} был кикнут. Причина: ${reason}`);
-    process.exit(1);
-});
-
-bot.on('error', (err) => {
-    console.log(`⚠️ Ошибка у бота ${botName}:`, err.message);
-    process.exit(1);
-});
-
-bot.on('end', (reason) => {
-    console.log(`🔌 Бот ${botName} отключился от сервера. Причина: ${reason || 'неизвестна'}`);
-    process.exit(0);
-});
+// Загружаем прокси и стартуем
+loadProxyList();
+attemptConnect();
