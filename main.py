@@ -1,13 +1,15 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов через Mineflayer
-# Поддержка нескольких ботов, прокси, команд /create, /stop, /stop_all, /list
+# Поддержка нескольких ботов, автоматический reconnect внутри Node.js,
+# команды /create, /stop, /stop_all, /list, /status
 
 import os
 import subprocess
 import logging
 import sys
 import asyncio
-import random
+import time
+from datetime import datetime
 from telegram import Update, ForceReply
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -24,24 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Хранилище активных ботов: {ник: процесс}
+# Хранилище активных ботов: {ник: {'process': process, 'start_time': timestamp}}
 active_bots = {}
 
 # Хранилище состояний пользователей для пошагового диалога
 user_data = {}
-
-# --- Загрузка прокси из файла ---
-PROXY_LIST = []
-try:
-    with open("proxies.txt", "r") as f:
-        PROXY_LIST = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-    logger.info(f"Загружено {len(PROXY_LIST)} прокси из proxies.txt")
-except FileNotFoundError:
-    logger.warning("Файл proxies.txt не найден, работаем без прокси")
-    PROXY_LIST = None
-
-# Счётчик для циклической раздачи прокси
-proxy_index = 0
 
 # --- Проверка доступности node ---
 def check_node():
@@ -62,9 +51,9 @@ def check_node():
         logger.error(f"Ошибка при проверке node: {e}")
         return False
 
-# --- Вспомогательная функция для запуска бота ---
+# --- Вспомогательная функция для запуска бота (без прокси, только IP, порт, ник) ---
 async def launch_bot(update, ip, port, nick):
-    """Запускает Minecraft-бота, назначает прокси и сохраняет процесс."""
+    """Запускает Minecraft-бота. Прокси управляются внутри minecraft_bot.js."""
     if nick in active_bots:
         await update.message.reply_text(f"❌ Бот с ником **{nick}** уже запущен. Используй другой ник.")
         return False
@@ -73,20 +62,7 @@ async def launch_bot(update, ip, port, nick):
         await update.message.reply_text("❌ Ошибка: Node.js не найден на сервере. Сообщи администратору.")
         return False
 
-    # Выбираем прокси (если есть)
-    proxy_url = None
-    if PROXY_LIST:
-        global proxy_index
-        proxy_url = PROXY_LIST[proxy_index % len(PROXY_LIST)]
-        proxy_index += 1
-        logger.info(f"Боту {nick} назначен прокси {proxy_url}")
-    else:
-        logger.info(f"Бот {nick} запускается без прокси")
-
-    # Формируем аргументы командной строки
     args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
-    if proxy_url:
-        args.append(proxy_url)
 
     try:
         process = subprocess.Popen(
@@ -94,12 +70,14 @@ async def launch_bot(update, ip, port, nick):
             stdout=None,
             stderr=None
         )
-        active_bots[nick] = process
+        active_bots[nick] = {
+            'process': process,
+            'start_time': time.time()
+        }
         asyncio.create_task(wait_for_bot(nick, process))
 
         await update.message.reply_text(
-            f"✅ Бот **{nick}** запущен" + (f" через прокси {proxy_url}" if proxy_url else "") +
-            f"\nПодключается к **{ip}:{port}**.\nПодробности в логах Railway."
+            f"✅ Бот **{nick}** запущен.\nПодключается к **{ip}:{port}**.\nПодробности в логах Railway."
         )
         return True
     except Exception as e:
@@ -131,7 +109,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/create <количество> [префикс] — создать несколько ботов (до 100)\n"
         "/stop <ник> — остановить конкретного бота\n"
         "/stop_all — остановить всех ботов\n"
-        "/list — список активных ботов\n"
+        "/list — список активных ботов (только ники)\n"
+        "/status — подробный статус активных ботов\n"
         "/cancel — отменить текущий диалог"
     )
 
@@ -193,7 +172,7 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if nick not in active_bots:
         await update.message.reply_text(f"Бот {nick} не найден в списке активных.")
         return
-    proc = active_bots[nick]
+    proc = active_bots[nick]['process']
     try:
         proc.terminate()
         await update.message.reply_text(f"✅ Отправлен сигнал остановки боту {nick}.")
@@ -206,9 +185,9 @@ async def stop_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нет активных ботов.")
         return
     count = len(active_bots)
-    for nick, proc in list(active_bots.items()):
+    for nick, data in list(active_bots.items()):
         try:
-            proc.terminate()
+            data['process'].terminate()
             logger.info(f"Остановлен бот {nick}")
         except Exception as e:
             logger.error(f"Ошибка при остановке бота {nick}: {e}")
@@ -221,6 +200,17 @@ async def list_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     nicks = list(active_bots.keys())
     await update.message.reply_text(f"Активные боты ({len(nicks)}):\n" + "\n".join(nicks))
+
+async def status_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not active_bots:
+        await update.message.reply_text("Нет активных ботов.")
+        return
+    lines = []
+    for nick, data in active_bots.items():
+        uptime_seconds = time.time() - data['start_time']
+        uptime_str = str(datetime.timedelta(seconds=int(uptime_seconds)))
+        lines.append(f"**{nick}** — PID {data['process'].pid}, работает {uptime_str}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -278,7 +268,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if await launch_bot(update, state['ip'], port, nick):
                 success += 1
         await update.message.reply_text(
-            f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list для просмотра."
+            f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
         )
         del user_data[user_id]
         return
@@ -300,6 +290,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop_bot))
     app.add_handler(CommandHandler("stop_all", stop_all))
     app.add_handler(CommandHandler("list", list_bots))
+    app.add_handler(CommandHandler("status", status_bots))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
