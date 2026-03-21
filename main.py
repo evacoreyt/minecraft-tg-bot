@@ -192,6 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif step == 'waiting_for_port':
         port = text if text else '25565'
+        state['port'] = port   # ← сохранение порта
         if 'nicks' in state:
             # множественный запуск
             nicks = state['nicks']
@@ -213,7 +214,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == 'waiting_for_nick':
         nick = text
         ip = state['ip']
-        port = state['port']
+        port = state['port']   # теперь порт есть
         await update.message.reply_text(f"Запускаю бота {nick}...")
         await launch_bot(update, ip, port, nick, ai_mode=ai_mode)
         del user_data[user_id]
@@ -222,7 +223,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == 'waiting_for_ip_for_create':
         state['ip'] = text
         state['step'] = 'waiting_for_port_for_create'
-        await update.message.reply_text("🔌 Введи порт (Enter = 25565):")
+        await update.message.reply_text(
+            "🔌 Введи порт (Enter = 25565):"
+        )
         return
 
     elif step == 'waiting_for_port_for_create':
@@ -240,7 +243,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_data[user_id]
         return
 
-# --- Остальные команды без изменений ---
+# --- Остальные команды ---
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Использование: /stop <ник>")
