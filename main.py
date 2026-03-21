@@ -1,7 +1,5 @@
 # ===== main.py =====
-# Telegram bot для запуска Minecraft-ботов (без прокси)
-# Задержка между запусками: 5 секунд (настраивается через DELAY_BETWEEN_BOTS)
-
+# Добавлена команда /ai для запуска бота с ИИ
 import os
 import subprocess
 import logging
@@ -12,14 +10,10 @@ from datetime import datetime, timedelta
 from telegram import Update, ForceReply
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-# --- Настройки ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
-    print("❌ Ошибка: Не найден TELEGRAM_TOKEN в переменных окружения!")
+    print("❌ Ошибка: Не найден TELEGRAM_TOKEN!")
     sys.exit(1)
-
-# Задержка между запусками ботов (в секундах)
-DELAY_BETWEEN_BOTS = int(os.environ.get("DELAY_BETWEEN_BOTS", 5))
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -61,24 +55,29 @@ def check_node():
     _last_node_check = now
     return _node_check_result
 
-async def launch_bot(update, ip, port, nick):
+async def launch_bot(update, ip, port, nick, ai_mode=False):
     async with bot_launch_semaphore:
         if nick in active_bots:
-            await update.message.reply_text(f"❌ Бот с ником **{nick}** уже запущен.")
+            await update.message.reply_text(f"❌ Бот **{nick}** уже запущен.")
             return False
 
         if not check_node():
-            await update.message.reply_text("❌ Ошибка: Node.js не найден на сервере.")
+            await update.message.reply_text("❌ Ошибка: Node.js не найден.")
             return False
 
         args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
+        if ai_mode:
+            args.append('--ai')
 
         try:
             process = subprocess.Popen(args, stdout=None, stderr=None)
             active_bots[nick] = {'process': process, 'start_time': time.time()}
             asyncio.create_task(wait_for_bot(nick, process))
+            mode = "с ИИ" if ai_mode else "обычный"
             await update.message.reply_text(
-                f"✅ Бот **{nick}** запущен.\nПодключается к **{ip}:{port}**.\nПодробности в логах Railway."
+                f"✅ Бот **{nick}** ({mode}) запущен.\n"
+                f"Подключается к **{ip}:{port}**.\n"
+                f"Подробности в логах Railway."
             )
             return True
         except Exception as e:
@@ -97,7 +96,7 @@ async def wait_for_bot(nick, process):
             del active_bots[nick]
         logger.info(f"Бот {nick} удалён из списка активных")
 
-# --- Команды Telegram (без изменений) ---
+# --- Команды ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_html(
@@ -107,19 +106,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Команды:\n"
         "/connect — пошагово создать одного бота\n"
-        "/create <количество> [префикс] — создать несколько ботов (до 1000)\n"
+        "/ai — запустить бота с ИИ (Gemini)\n"
+        "/create <количество> [префикс] — создать несколько ботов\n"
         "/stop <ник> — остановить конкретного бота\n"
         "/stop_all — остановить всех ботов\n"
-        "/list — список активных ботов (только ники)\n"
-        "/status — подробный статус активных ботов\n"
+        "/list — список активных ботов\n"
+        "/status — подробный статус\n"
         "/cancel — отменить текущий диалог"
+    )
+
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запуск бота с ИИ через пошаговый диалог"""
+    user_id = update.effective_user.id
+    user_data[user_id] = {'step': 'waiting_for_ip', 'ai_mode': True}
+    await update.message.reply_text(
+        "🤖 Запуск бота с ИИ.\nВведи IP-адрес сервера:"
     )
 
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_data[user_id] = {'step': 'waiting_for_ip'}
+    user_data[user_id] = {'step': 'waiting_for_ip', 'ai_mode': False}
     await update.message.reply_text(
-        "🌐 Отлично! Введи IP-адрес сервера (например, localhost или play.example.com):"
+        "🌐 Введи IP-адрес сервера:"
     )
 
 async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,61 +135,121 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 1:
         await update.message.reply_text("Использование: /create <количество> [префикс]")
         return
-
     try:
         count = int(args[0])
     except ValueError:
         await update.message.reply_text("Количество должно быть числом.")
         return
-
     if count < 1 or count > 1000:
         await update.message.reply_text("Количество должно быть от 1 до 1000.")
         return
-
     prefix = args[1] if len(args) > 1 else "Astral"
     if not prefix.replace('_', '').isalnum():
-        await update.message.reply_text("Префикс может содержать только буквы, цифры и символ подчёркивания.")
+        await update.message.reply_text("Префикс может содержать только буквы, цифры и подчёркивание.")
         return
-
     if len(active_bots) + count > MAX_BOTS:
         await update.message.reply_text(
             f"❌ Превышен лимит активных ботов ({MAX_BOTS}). Сейчас активно {len(active_bots)}.\n"
             "Используйте /stop_all или подождите, пока некоторые боты завершатся."
         )
         return
-
     nicks = []
     for i in range(1, count + 1):
         nick = f"{prefix}_{i:02d}" if count > 9 else f"{prefix}_{i}"
         if nick in active_bots:
             continue
         nicks.append(nick)
-
     if not nicks:
         await update.message.reply_text("Все возможные ники уже заняты. Попробуй другой префикс.")
         return
-
     user_id = update.effective_user.id
     user_data[user_id] = {
         'step': 'waiting_for_ip_for_create',
         'nicks': nicks,
-        'count': len(nicks)
+        'count': len(nicks),
+        'ai_mode': False
     }
     await update.message.reply_text(
         f"🚀 Запускаю {len(nicks)} ботов.\n🌐 Введи IP-адрес сервера:"
     )
 
+# --- Обработка диалогов (упрощённая) ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    if user_id not in user_data:
+        return
+    state = user_data[user_id]
+    step = state.get('step')
+    ai_mode = state.get('ai_mode', False)
+
+    if step == 'waiting_for_ip':
+        state['ip'] = text
+        state['step'] = 'waiting_for_port'
+        await update.message.reply_text(
+            "🔌 Введи порт (Enter = 25565):"
+        )
+        return
+
+    elif step == 'waiting_for_port':
+        port = text if text else '25565'
+        if 'nicks' in state:
+            # множественный запуск
+            nicks = state['nicks']
+            success = 0
+            for nick in nicks:
+                if await launch_bot(update, state['ip'], port, nick, ai_mode=ai_mode):
+                    success += 1
+                await asyncio.sleep(5)  # задержка 5 сек
+            await update.message.reply_text(
+                f"✅ Запущено {success} из {len(nicks)} ботов."
+            )
+            del user_data[user_id]
+        else:
+            # одиночный запуск
+            state['step'] = 'waiting_for_nick'
+            await update.message.reply_text("🧑 Введи никнейм для бота:")
+        return
+
+    elif step == 'waiting_for_nick':
+        nick = text
+        ip = state['ip']
+        port = state['port']
+        await launch_bot(update, ip, port, nick, ai_mode=ai_mode)
+        del user_data[user_id]
+        return
+
+    elif step == 'waiting_for_ip_for_create':
+        state['ip'] = text
+        state['step'] = 'waiting_for_port_for_create'
+        await update.message.reply_text("🔌 Введи порт (Enter = 25565):")
+        return
+
+    elif step == 'waiting_for_port_for_create':
+        port = text if text else '25565'
+        nicks = state['nicks']
+        success = 0
+        for nick in nicks:
+            if await launch_bot(update, state['ip'], port, nick, ai_mode=False):
+                success += 1
+            await asyncio.sleep(5)
+        await update.message.reply_text(
+            f"✅ Запущено {success} из {len(nicks)} ботов."
+        )
+        del user_data[user_id]
+        return
+
+# --- Остальные команды ---
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Использование: /stop <ник>")
         return
     nick = context.args[0]
     if nick not in active_bots:
-        await update.message.reply_text(f"Бот {nick} не найден в списке активных.")
+        await update.message.reply_text(f"Бот {nick} не найден.")
         return
-    proc = active_bots[nick]['process']
     try:
-        proc.terminate()
+        active_bots[nick]['process'].terminate()
         await update.message.reply_text(f"✅ Отправлен сигнал остановки боту {nick}.")
     except Exception as e:
         logger.error(f"Ошибка при остановке {nick}: {e}")
@@ -195,7 +263,6 @@ async def stop_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for nick, data in list(active_bots.items()):
         try:
             data['process'].terminate()
-            logger.info(f"Остановлен бот {nick}")
         except Exception as e:
             logger.error(f"Ошибка при остановке бота {nick}: {e}")
     active_bots.clear()
@@ -227,73 +294,20 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Нет активного процесса.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-
-    if user_id not in user_data:
-        return
-
-    state = user_data[user_id]
-
-    if state.get('step') == 'waiting_for_ip':
-        state['ip'] = text
-        state['step'] = 'waiting_for_port'
-        await update.message.reply_text(
-            "🔌 Введи порт (обычно 25565, просто нажми Enter, если не знаешь):",
-            reply_markup=ForceReply(selective=True)
-        )
-        return
-
-    elif state.get('step') == 'waiting_for_port':
-        port = text if text else '25565'
-        state['step'] = 'waiting_for_nick'
-        await update.message.reply_text("🧑 Введи никнейм для бота (например, MyBot):")
-        return
-
-    elif state.get('step') == 'waiting_for_nick':
-        nick = text
-        ip = state['ip']
-        port = state['port']
-        await launch_bot(update, ip, port, nick)
-        del user_data[user_id]
-        return
-
-    elif state.get('step') == 'waiting_for_ip_for_create':
-        state['ip'] = text
-        state['step'] = 'waiting_for_port_for_create'
-        await update.message.reply_text(
-            "🔌 Введи порт (обычно 25565, просто нажми Enter, если не знаешь):"
-        )
-        return
-
-    elif state.get('step') == 'waiting_for_port_for_create':
-        port = text if text else '25565'
-        nicks = state['nicks']
-        success = 0
-        for nick in nicks:
-            if await launch_bot(update, state['ip'], port, nick):
-                success += 1
-            await asyncio.sleep(DELAY_BETWEEN_BOTS)   # ← задержка 5 секунд
-        await update.message.reply_text(
-            f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
-        )
-        del user_data[user_id]
-        return
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.warning(f"Update {update} вызвал ошибку {context.error}")
 
 def main():
     if not check_node():
-        logger.error("Node.js не доступен! Бот не сможет запускать Minecraft-ботов.")
+        logger.error("Node.js не доступен!")
     else:
-        logger.info("Node.js доступен, всё готово к работе.")
+        logger.info("Node.js доступен.")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("connect", connect))
+    app.add_handler(CommandHandler("ai", ai_command))
     app.add_handler(CommandHandler("create", create_command))
     app.add_handler(CommandHandler("stop", stop_bot))
     app.add_handler(CommandHandler("stop_all", stop_all))
