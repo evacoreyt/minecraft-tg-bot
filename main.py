@@ -107,7 +107,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Команды:\n"
         "/connect — пошагово создать одного бота\n"
-        "/ai — запустить бота с ИИ (Gemini)\n"
+        "/ai — запустить бота с ИИ (Gemini/OpenRouter/Ollama)\n"
         "/create <количество> [префикс] — создать несколько ботов\n"
         "/stop <ник> — остановить конкретного бота\n"
         "/stop_all — остановить всех ботов\n"
@@ -192,9 +192,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif step == 'waiting_for_port':
         port = text if text else '25565'
-        state['port'] = port   # ← сохранение порта
+        state['port'] = port
         if 'nicks' in state:
-            # множественный запуск
             nicks = state['nicks']
             success = 0
             for nick in nicks:
@@ -214,7 +213,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == 'waiting_for_nick':
         nick = text
         ip = state['ip']
-        port = state['port']   # теперь порт есть
+        port = state['port']
         await update.message.reply_text(f"Запускаю бота {nick}...")
         await launch_bot(update, ip, port, nick, ai_mode=ai_mode)
         del user_data[user_id]
