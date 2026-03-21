@@ -1,11 +1,11 @@
-// minecraft_bot.js – обычный бот + режим ИИ с поддержкой Ollama / OpenRouter / Gemini
+// minecraft_bot.js – с расширенным логированием для отладки
 const mineflayer = require('mineflayer');
 const Vec3 = require('vec3');
 
 // ---------- Настройки ----------
-const RECONNECT_DELAY = 10000;      // 10 секунд между попытками
-const MAX_RECONNECT_ATTEMPTS = 20;  // максимальное число попыток
-const CONNECTION_TIMEOUT = 30000;   // 30 секунд таймаут подключения
+const RECONNECT_DELAY = 10000;
+const MAX_RECONNECT_ATTEMPTS = 20;
+const CONNECTION_TIMEOUT = 30000;
 
 let shouldReconnect = true;
 let reconnectAttempts = 0;
@@ -13,29 +13,28 @@ let loginSuccess = false;
 let currentBot = null;
 let loginTimeout = null;
 
-// Режим ИИ
 const AI_MODE = process.argv.includes('--ai');
 
-// Выбор LLM по переменным окружения
+// Переменные окружения
 const OLLAMA_URL = process.env.OLLAMA_URL;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-// Модель по умолчанию для Ollama (можно переопределить переменной OLLAMA_MODEL)
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'sweaterdog/andy-4:micro-q8_0';
-// Модель для OpenRouter (бесплатная)
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'mistralai/mistral-7b-instruct:free';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'sweaterdog/andy-4:micro-q8_0';
+
+console.log(`[DEBUG] AI_MODE = ${AI_MODE}`);
+console.log(`[DEBUG] OLLAMA_URL = ${OLLAMA_URL || 'не задан'}`);
+console.log(`[DEBUG] OPENROUTER_API_KEY = ${OPENROUTER_API_KEY ? 'задан (длина ' + OPENROUTER_API_KEY.length + ')' : 'не задан'}`);
+console.log(`[DEBUG] GEMINI_API_KEY = ${GEMINI_API_KEY ? 'задан' : 'не задан'}`);
+console.log(`[DEBUG] OPENROUTER_MODEL = ${OPENROUTER_MODEL}`);
+console.log(`[DEBUG] OLLAMA_MODEL = ${OLLAMA_MODEL}`);
 
 if (AI_MODE && !OLLAMA_URL && !OPENROUTER_API_KEY && !GEMINI_API_KEY) {
-    console.log('⚠️ Режим ИИ включён, но не задан ни один источник (OLLAMA_URL, OPENROUTER_API_KEY, GEMINI_API_KEY)');
+    console.log('⚠️ Режим ИИ включён, но нет ни одного провайдера. Выход.');
     process.exit(1);
 }
 
-// ---------- Фильтрация сообщений ----------
-// Бот будет реагировать, если:
-// - его упомянули по имени (например, "Kaine, привет" или "@Kaine")
-// - сообщение начинается с его имени с двоеточием ("Kaine: ...")
-// - это личное сообщение (whisper)
+// ---------- Фильтрация ----------
 function shouldRespond(bot, username, message) {
     if (username === bot.username) return false;
     const lowerMsg = message.toLowerCase();
@@ -48,7 +47,7 @@ function shouldRespond(bot, username, message) {
 
 // ---------- Троттлинг ----------
 let lastRequestTime = 0;
-const REQUEST_COOLDOWN_MS = 5000; // 5 секунд между запросами
+const REQUEST_COOLDOWN_MS = 5000;
 
 function canMakeRequest() {
     const now = Date.now();
@@ -59,9 +58,9 @@ function canMakeRequest() {
     return false;
 }
 
-// ---------- Кэш ответов ----------
+// ---------- Кэш ----------
 const responseCache = new Map();
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 минут
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
 function getCachedResponse(prompt) {
     const cached = responseCache.get(prompt);
@@ -77,7 +76,6 @@ function setCachedResponse(prompt, answer) {
 
 // ---------- Вызовы LLM ----------
 
-// 1. Ollama (локальная)
 async function callOllama(prompt) {
     const url = `${OLLAMA_URL}/api/generate`;
     const body = {
@@ -87,6 +85,7 @@ async function callOllama(prompt) {
         options: { temperature: 0.7, max_tokens: 150 }
     };
     try {
+        console.log(`[Ollama] Запрос к ${url}`);
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -96,16 +95,19 @@ async function callOllama(prompt) {
         if (data.response) {
             return data.response.trim();
         }
-        console.error('Ошибка Ollama:', data);
+        console.error('[Ollama] Ошибка в ответе:', data);
         return "Извините, я не могу ответить сейчас.";
     } catch (err) {
-        console.error('Ошибка вызова Ollama:', err);
+        console.error('[Ollama] Исключение:', err);
         return "Произошла ошибка при обращении к ИИ.";
     }
 }
 
-// 2. OpenRouter (бесплатные модели)
 async function callOpenRouter(prompt) {
+    if (!OPENROUTER_API_KEY) {
+        console.error('[OpenRouter] Ключ не задан');
+        return "Нет API ключа для OpenRouter.";
+    }
     const url = 'https://openrouter.ai/api/v1/chat/completions';
     const body = {
         model: OPENROUTER_MODEL,
@@ -117,28 +119,39 @@ async function callOpenRouter(prompt) {
         temperature: 0.7
     };
     try {
+        console.log(`[OpenRouter] Запрос к ${url} с моделью ${OPENROUTER_MODEL}`);
         const response = await fetch(url, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${OPENROUTER_API_KEY}`
+                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                'HTTP-Referer': 'https://railway.app',
+                'X-Title': 'Minecraft Bot'
             },
             body: JSON.stringify(body)
         });
         const data = await response.json();
+        console.log(`[OpenRouter] Статус ответа: ${response.status}`);
+        if (!response.ok) {
+            console.error('[OpenRouter] Ошибка:', JSON.stringify(data, null, 2));
+            return `Ошибка API (${response.status}): ${data.error?.message || 'неизвестная'}`;
+        }
         if (data.choices && data.choices[0].message) {
             return data.choices[0].message.content.trim();
         }
-        console.error('Ошибка OpenRouter:', data);
+        console.error('[OpenRouter] Неожиданный формат ответа:', data);
         return "Извините, я не могу ответить сейчас.";
     } catch (err) {
-        console.error('Ошибка вызова OpenRouter:', err);
+        console.error('[OpenRouter] Исключение:', err);
         return "Произошла ошибка при обращении к ИИ.";
     }
 }
 
-// 3. Gemini (резервный)
 async function callGemini(prompt) {
+    if (!GEMINI_API_KEY) {
+        console.error('[Gemini] Ключ не задан');
+        return "Нет API ключа для Gemini.";
+    }
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
     try {
         const response = await fetch(url, {
@@ -152,43 +165,42 @@ async function callGemini(prompt) {
         if (data.candidates && data.candidates[0].content) {
             return data.candidates[0].content.parts[0].text;
         }
-        console.error('Ошибка Gemini:', data);
+        console.error('[Gemini] Ошибка:', data);
         return "Извините, я не могу ответить сейчас.";
     } catch (err) {
-        console.error('Ошибка вызова Gemini:', err);
+        console.error('[Gemini] Исключение:', err);
         return "Произошла ошибка при обращении к ИИ.";
     }
 }
 
-// Основная функция вызова LLM (выбирает доступный)
 async function callLLM(prompt) {
     if (OLLAMA_URL) {
+        console.log('[LLM] Использую Ollama');
         return await callOllama(prompt);
     } else if (OPENROUTER_API_KEY) {
+        console.log('[LLM] Использую OpenRouter');
         return await callOpenRouter(prompt);
     } else if (GEMINI_API_KEY) {
+        console.log('[LLM] Использую Gemini');
         return await callGemini(prompt);
     } else {
-        return "Нет доступного API для ИИ.";
+        console.error('[LLM] Нет доступного провайдера');
+        return "Нет доступного ИИ.";
     }
 }
 
-// Выполнение действий, описанных в ответе ИИ (упрощённый парсинг)
+// ---------- Действия ----------
 function executeAction(bot, actionText) {
     const lower = actionText.toLowerCase();
-    // Пример: "пойти на 100 64 200"
     const moveMatch = lower.match(/(?:пойти|иди|move)\s+на\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/);
     if (moveMatch) {
         const x = parseInt(moveMatch[1]);
         const y = parseInt(moveMatch[2]);
         const z = parseInt(moveMatch[3]);
         bot.chat(`Иду к ${x} ${y} ${z}`);
-        // Требуется установка mineflayer-navigate или использование bot.pathfinder
-        // Здесь упрощённо – просто сообщаем о намерении
-        // Для реального движения нужен плагин pathfinder
+        // Здесь нужен pathfinder, пока только сообщаем
         return;
     }
-    // Копать впереди (если есть блок)
     const digMatch = lower.match(/(?:копать|dig)/);
     if (digMatch) {
         const block = bot.blockAt(bot.entity.position.offset(0, 0, 1));
@@ -200,7 +212,6 @@ function executeAction(bot, actionText) {
         }
         return;
     }
-    // Поставить блок (простейший пример – ставим камень под ноги)
     const placeMatch = lower.match(/(?:поставить|place)/);
     if (placeMatch) {
         const block = bot.blockAt(bot.entity.position.offset(0, -1, 0));
@@ -218,7 +229,7 @@ function executeAction(bot, actionText) {
     }
 }
 
-// Создание бота
+// ---------- Создание и подключение бота ----------
 function createBot() {
     const serverIp = process.argv[2];
     const serverPort = parseInt(process.argv[3]) || 25565;
@@ -280,7 +291,6 @@ function attemptConnect() {
         }
     });
 
-    // Обработка сообщений (только если ИИ включён)
     if (AI_MODE) {
         bot.on('chat', async (username, message) => {
             if (!shouldRespond(bot, username, message)) return;
@@ -291,7 +301,6 @@ function attemptConnect() {
 
             console.log(`[CHAT] ${username}: ${message}`);
 
-            // Проверка кэша
             const cacheKey = `${username}:${message}`;
             const cached = getCachedResponse(cacheKey);
             if (cached) {
@@ -329,7 +338,6 @@ function attemptConnect() {
         });
     }
 
-    // Стандартные обработчики для всех ботов
     bot.on('kicked', (reason) => {
         console.log(`❌ Бот ${bot.username} был кикнут. Причина: ${reason}`);
         disconnectAndReconnect();
@@ -371,5 +379,4 @@ process.on('SIGTERM', () => {
     setTimeout(() => process.exit(0), 1000);
 });
 
-// Запуск
 attemptConnect();
