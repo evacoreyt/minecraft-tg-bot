@@ -1,5 +1,4 @@
 # ===== main.py =====
-# Добавлена команда /ai для запуска бота с ИИ
 import os
 import subprocess
 import logging
@@ -69,6 +68,8 @@ async def launch_bot(update, ip, port, nick, ai_mode=False):
         if ai_mode:
             args.append('--ai')
 
+        logger.info(f"Запускаю бота {nick} с параметрами {args}")
+
         try:
             process = subprocess.Popen(args, stdout=None, stderr=None)
             active_bots[nick] = {'process': process, 'start_time': time.time()}
@@ -116,7 +117,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Запуск бота с ИИ через пошаговый диалог"""
     user_id = update.effective_user.id
     user_data[user_id] = {'step': 'waiting_for_ip', 'ai_mode': True}
     await update.message.reply_text(
@@ -173,7 +173,6 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚀 Запускаю {len(nicks)} ботов.\n🌐 Введи IP-адрес сервера:"
     )
 
-# --- Обработка диалогов (упрощённая) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -198,15 +197,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nicks = state['nicks']
             success = 0
             for nick in nicks:
+                await update.message.reply_text(f"Запускаю бота {nick}...")
                 if await launch_bot(update, state['ip'], port, nick, ai_mode=ai_mode):
                     success += 1
-                await asyncio.sleep(5)  # задержка 5 сек
+                await asyncio.sleep(5)
             await update.message.reply_text(
                 f"✅ Запущено {success} из {len(nicks)} ботов."
             )
             del user_data[user_id]
         else:
-            # одиночный запуск
             state['step'] = 'waiting_for_nick'
             await update.message.reply_text("🧑 Введи никнейм для бота:")
         return
@@ -215,6 +214,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nick = text
         ip = state['ip']
         port = state['port']
+        await update.message.reply_text(f"Запускаю бота {nick}...")
         await launch_bot(update, ip, port, nick, ai_mode=ai_mode)
         del user_data[user_id]
         return
@@ -230,6 +230,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nicks = state['nicks']
         success = 0
         for nick in nicks:
+            await update.message.reply_text(f"Запускаю бота {nick}...")
             if await launch_bot(update, state['ip'], port, nick, ai_mode=False):
                 success += 1
             await asyncio.sleep(5)
@@ -239,7 +240,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_data[user_id]
         return
 
-# --- Остальные команды ---
+# --- Остальные команды без изменений ---
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Использование: /stop <ник>")
