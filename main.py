@@ -1,6 +1,6 @@
 # ===== main.py =====
-# Telegram bot для запуска Minecraft-ботов через Mineflayer
-# Упрощённая версия: боты используют прокси из proxies.txt напрямую.
+# Telegram bot для запуска Minecraft-ботов (без прокси)
+# Просто запускает ботов через minecraft_bot.js
 
 import os
 import subprocess
@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from telegram import Update, ForceReply
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+# --- Настройки ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     print("❌ Ошибка: Не найден TELEGRAM_TOKEN в переменных окружения!")
@@ -23,14 +24,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Хранилище активных ботов
 active_bots = {}
 user_data = {}
-MAX_BOTS = 100
-bot_launch_semaphore = asyncio.Semaphore(20)
 
+# --- Ограничения ---
+MAX_BOTS = 100                     # Максимальное количество активных ботов
+bot_launch_semaphore = asyncio.Semaphore(20)   # Одновременно запускаем не более 20 ботов
 _last_node_check = 0
 _node_check_result = False
 
+# --- Проверка доступности node ---
 def check_node():
     global _last_node_check, _node_check_result
     now = time.time()
@@ -58,6 +62,7 @@ def check_node():
     _last_node_check = now
     return _node_check_result
 
+# --- Запуск бота ---
 async def launch_bot(update, ip, port, nick):
     async with bot_launch_semaphore:
         if nick in active_bots:
@@ -67,9 +72,6 @@ async def launch_bot(update, ip, port, nick):
         if not check_node():
             await update.message.reply_text("❌ Ошибка: Node.js не найден на сервере.")
             return False
-
-        if not os.path.exists('proxies.txt'):
-            await update.message.reply_text("⚠️ Внимание: файл proxies.txt не найден. Боты будут подключаться напрямую (риск блокировки).")
 
         args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
 
@@ -97,7 +99,7 @@ async def wait_for_bot(nick, process):
             del active_bots[nick]
         logger.info(f"Бот {nick} удалён из списка активных")
 
-# --- Команды Telegram (без изменений) ---
+# --- Команды Telegram ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_html(
