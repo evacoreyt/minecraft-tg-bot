@@ -1,8 +1,8 @@
-// minecraft_bot.js – бот без прокси
+// minecraft_bot.js – бот без прокси, с увеличенной задержкой reconnect
 const mineflayer = require('mineflayer');
 
 // ---------- Настройки ----------
-const RECONNECT_DELAY = 5000;       // 5 секунд между попытками
+const RECONNECT_DELAY = 10000;      // 10 секунд между попытками (было 5)
 const MAX_RECONNECT_ATTEMPTS = 20;  // максимальное число попыток
 const CONNECTION_TIMEOUT = 30000;   // 30 секунд таймаут подключения
 
@@ -51,7 +51,6 @@ function attemptConnect() {
     loginSuccess = false;
     currentBot = bot;
 
-    // Таймаут на подключение
     loginTimeout = setTimeout(() => {
         if (!loginSuccess) {
             console.log('❌ Таймаут подключения (30 сек)');
@@ -105,7 +104,6 @@ function disconnectAndReconnect() {
     }
 }
 
-// Обработка сигнала завершения
 process.on('SIGTERM', () => {
     console.log('Получен SIGTERM, отключаю reconnect');
     shouldReconnect = false;
@@ -113,5 +111,4 @@ process.on('SIGTERM', () => {
     setTimeout(() => process.exit(0), 1000);
 });
 
-// Запускаем
 attemptConnect();
