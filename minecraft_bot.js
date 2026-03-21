@@ -1,118 +1,30 @@
-// minecraft_bot.js
+// minecraft_bot.js – бот без прокси
 const mineflayer = require('mineflayer');
-const fs = require('fs');
-const path = require('path');
-let socksClient;
-try {
-    socksClient = require('socks').SocksClient;
-} catch (e) {
-    console.log('⚠️ Модуль socks не найден, прокси не будут работать');
-    socksClient = null;
-}
 
 // ---------- Настройки ----------
-const PROXY_FILE = path.join(__dirname, 'proxies.txt');      // читаем напрямую
 const RECONNECT_DELAY = 5000;       // 5 секунд между попытками
 const MAX_RECONNECT_ATTEMPTS = 20;  // максимальное число попыток
 const CONNECTION_TIMEOUT = 30000;   // 30 секунд таймаут подключения
 
-let proxyList = [];
-let currentProxyIndex = 0;
 let shouldReconnect = true;
 let reconnectAttempts = 0;
 let loginSuccess = false;
 let currentBot = null;
 let loginTimeout = null;
 
-// Загружаем список прокси из файла proxies.txt
-function loadProxyList() {
-    try {
-        const content = fs.readFileSync(PROXY_FILE, 'utf8');
-        proxyList = content.split('\n')
-            .map(line => line.trim())
-            .filter(line => line && !line.startsWith('#'));
-        // Убедимся, что у каждого прокси есть схема socks5://
-        proxyList = proxyList.map(proxy => {
-            if (!proxy.startsWith('socks5://')) {
-                return 'socks5://' + proxy;
-            }
-            return proxy;
-        });
-        console.log(`📄 Загружено ${proxyList.length} прокси из ${PROXY_FILE}`);
-        if (proxyList.length === 0) {
-            console.log('⚠️ Список прокси пуст, работаем без прокси');
-        }
-    } catch (err) {
-        console.log(`⚠️ Не удалось прочитать ${PROXY_FILE}: ${err.message}. Работаем без прокси`);
-        proxyList = [];
-    }
-}
-
-// Выбирает следующий прокси (по кругу)
-function getNextProxy() {
-    if (proxyList.length === 0) return null;
-    const proxy = proxyList[currentProxyIndex % proxyList.length];
-    currentProxyIndex++;
-    return proxy;
-}
-
-// Создаёт бота с указанным прокси
-function createBotWithProxy(proxyUrl) {
+function createBot() {
     const serverIp = process.argv[2];
     const serverPort = parseInt(process.argv[3]) || 25565;
     const botName = process.argv[4] || 'MineBot';
 
     console.log(`🤖 Попытка подключения бота ${botName} к ${serverIp}:${serverPort}...`);
 
-    let options = {
+    const options = {
         host: serverIp,
         port: serverPort,
         username: botName,
         auth: 'offline'
     };
-
-    if (proxyUrl && socksClient) {
-        let proxyConfig;
-        try {
-            const parsed = new URL(proxyUrl);
-            proxyConfig = {
-                host: parsed.hostname,
-                port: parseInt(parsed.port),
-                type: 5,
-                timeout: 30000
-            };
-            if (parsed.username && parsed.password) {
-                proxyConfig.userId = parsed.username;
-                proxyConfig.password = parsed.password;
-            }
-        } catch (e) {
-            console.log(`❌ Неверный формат прокси: ${proxyUrl}`);
-            return null;
-        }
-        console.log(`🌐 Использую прокси ${proxyConfig.host}:${proxyConfig.port}`);
-
-        options.connect = (client) => {
-            socksClient.createConnection({
-                proxy: proxyConfig,
-                command: 'connect',
-                destination: {
-                    host: serverIp,      // ← важно: передаём домен, а не IP
-                    port: serverPort
-                },
-                timeout: 30000
-            }, (err, info) => {
-                if (err) {
-                    console.log(`❌ Ошибка прокси: ${err.message}`);
-                    client.emit('error', err);
-                    return;
-                }
-                client.setSocket(info.socket);
-                client.emit('connect');
-            });
-        };
-    } else if (proxyUrl && !socksClient) {
-        console.log('❌ Модуль socks не загружен, прокси не будет использован');
-    }
 
     return mineflayer.createBot(options);
 }
@@ -129,8 +41,7 @@ function attemptConnect() {
         process.exit(1);
     }
 
-    const proxy = getNextProxy();
-    const bot = createBotWithProxy(proxy);
+    const bot = createBot();
 
     if (!bot) {
         setTimeout(attemptConnect, RECONNECT_DELAY);
@@ -140,6 +51,7 @@ function attemptConnect() {
     loginSuccess = false;
     currentBot = bot;
 
+    // Таймаут на подключение
     loginTimeout = setTimeout(() => {
         if (!loginSuccess) {
             console.log('❌ Таймаут подключения (30 сек)');
@@ -193,6 +105,7 @@ function disconnectAndReconnect() {
     }
 }
 
+// Обработка сигнала завершения
 process.on('SIGTERM', () => {
     console.log('Получен SIGTERM, отключаю reconnect');
     shouldReconnect = false;
@@ -200,5 +113,5 @@ process.on('SIGTERM', () => {
     setTimeout(() => process.exit(0), 1000);
 });
 
-loadProxyList();
+// Запускаем
 attemptConnect();
