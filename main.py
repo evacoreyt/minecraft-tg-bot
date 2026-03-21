@@ -67,10 +67,22 @@ async def launch_bot(update, ip, port, nick, ai_mode=False):
         args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
         if ai_mode:
             args.append('--ai')
+            logger.info(f"Запуск бота {nick} в режиме ИИ")
+        else:
+            logger.info(f"Запуск бота {nick} в обычном режиме")
 
-        logger.info(f"Запускаю бота {nick} с параметрами {args}")
+        logger.info(f"Команда: {' '.join(args)}")
 
         try:
+            # Для отладки выведем переменные окружения, которые касаются LLM
+            env_vars = {
+                'OLLAMA_URL': os.environ.get('OLLAMA_URL'),
+                'OPENROUTER_API_KEY': '***' if os.environ.get('OPENROUTER_API_KEY') else None,
+                'GEMINI_API_KEY': '***' if os.environ.get('GEMINI_API_KEY') else None,
+                'OPENROUTER_MODEL': os.environ.get('OPENROUTER_MODEL')
+            }
+            logger.info(f"Переменные LLM: {env_vars}")
+
             process = subprocess.Popen(args, stdout=None, stderr=None)
             active_bots[nick] = {'process': process, 'start_time': time.time()}
             asyncio.create_task(wait_for_bot(nick, process))
