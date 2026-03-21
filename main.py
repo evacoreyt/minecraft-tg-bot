@@ -1,6 +1,6 @@
 # ===== main.py =====
 # Telegram bot для запуска Minecraft-ботов (без прокси)
-# Просто запускает ботов через minecraft_bot.js
+# Задержка между запусками: 5 секунд (настраивается через DELAY_BETWEEN_BOTS)
 
 import os
 import subprocess
@@ -18,23 +18,22 @@ if not TELEGRAM_TOKEN:
     print("❌ Ошибка: Не найден TELEGRAM_TOKEN в переменных окружения!")
     sys.exit(1)
 
+# Задержка между запусками ботов (в секундах)
+DELAY_BETWEEN_BOTS = int(os.environ.get("DELAY_BETWEEN_BOTS", 5))
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Хранилище активных ботов
 active_bots = {}
 user_data = {}
-
-# --- Ограничения ---
-MAX_BOTS = 100                     # Максимальное количество активных ботов
-bot_launch_semaphore = asyncio.Semaphore(20)   # Одновременно запускаем не более 20 ботов
+MAX_BOTS = 100
+bot_launch_semaphore = asyncio.Semaphore(20)
 _last_node_check = 0
 _node_check_result = False
 
-# --- Проверка доступности node ---
 def check_node():
     global _last_node_check, _node_check_result
     now = time.time()
@@ -62,7 +61,6 @@ def check_node():
     _last_node_check = now
     return _node_check_result
 
-# --- Запуск бота ---
 async def launch_bot(update, ip, port, nick):
     async with bot_launch_semaphore:
         if nick in active_bots:
@@ -99,7 +97,7 @@ async def wait_for_bot(nick, process):
             del active_bots[nick]
         logger.info(f"Бот {nick} удалён из списка активных")
 
-# --- Команды Telegram ---
+# --- Команды Telegram (без изменений) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_html(
@@ -276,7 +274,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for nick in nicks:
             if await launch_bot(update, state['ip'], port, nick):
                 success += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(DELAY_BETWEEN_BOTS)   # ← задержка 5 секунд
         await update.message.reply_text(
             f"✅ Запущено {success} из {len(nicks)} ботов. Используй /list или /status для просмотра."
         )
