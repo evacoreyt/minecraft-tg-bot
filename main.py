@@ -1,4 +1,4 @@
-# ===== main.py =====
+# main.py – Telegram-бот для управления Minecraft-ботами с поддержкой прокси
 import os
 import subprocess
 import logging
@@ -27,6 +27,24 @@ bot_launch_semaphore = asyncio.Semaphore(20)
 _last_node_check = 0
 _node_check_result = False
 
+PROXIES_FILE = os.environ.get("PROXIES_FILE", "proxies.txt")
+
+def load_proxies():
+    """Загружает прокси из файла, ожидает формат ip:port"""
+    proxies = []
+    try:
+        with open(PROXIES_FILE, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    # Добавляем префикс socks5:// если его нет
+                    if not line.startswith('socks5://'):
+                        line = f"socks5://{line}"
+                    proxies.append(line)
+    except FileNotFoundError:
+        logger.warning(f"Файл {PROXIES_FILE} не найден. Работа без прокси.")
+    return proxies
+
 def check_node():
     global _last_node_check, _node_check_result
     now = time.time()
@@ -54,7 +72,7 @@ def check_node():
     _last_node_check = now
     return _node_check_result
 
-async def launch_bot(update, ip, port, nick, ai_mode=False):
+async def launch_bot(update, ip, port, nick, proxy=None):
     async with bot_launch_semaphore:
         if nick in active_bots:
             await update.message.reply_text(f"❌ Бот **{nick}** уже запущен.")
@@ -65,33 +83,19 @@ async def launch_bot(update, ip, port, nick, ai_mode=False):
             return False
 
         args = ['/usr/bin/env', 'node', 'minecraft_bot.js', ip, port, nick]
-        if ai_mode:
-            args.append('--ai')
-            logger.info(f"Запуск бота {nick} в режиме ИИ")
-        else:
-            logger.info(f"Запуск бота {nick} в обычном режиме")
+        if proxy:
+            args.append(f'--proxy={proxy}')
 
-        logger.info(f"Команда: {' '.join(args)}")
+        logger.info(f"Запускаю бота {nick} с параметрами {args}")
 
         try:
-            # Для отладки выведем переменные окружения, которые касаются LLM
-            env_vars = {
-                'OLLAMA_URL': os.environ.get('OLLAMA_URL'),
-                'OPENROUTER_API_KEY': '***' if os.environ.get('OPENROUTER_API_KEY') else None,
-                'GEMINI_API_KEY': '***' if os.environ.get('GEMINI_API_KEY') else None,
-                'OPENROUTER_MODEL': os.environ.get('OPENROUTER_MODEL')
-            }
-            logger.info(f"Переменные LLM: {env_vars}")
-
             process = subprocess.Popen(args, stdout=None, stderr=None)
-            active_bots[nick] = {'process': process, 'start_time': time.time()}
+            active_bots[nick] = {'process': process, 'start_time': time.time(), 'proxy': proxy}
             asyncio.create_task(wait_for_bot(nick, process))
-            mode = "с ИИ" if ai_mode else "обычный"
-            await update.message.reply_text(
-                f"✅ Бот **{nick}** ({mode}) запущен.\n"
-                f"Подключается к **{ip}:{port}**.\n"
-                f"Подробности в логах Railway."
-            )
+            msg = f"✅ Бот **{nick}** запущен.\nПодключается к **{ip}:{port}**."
+            if proxy:
+                msg += f"\n🔒 Использует прокси: {proxy}"
+            await update.message.reply_text(msg)
             return True
         except Exception as e:
             logger.error(f"Ошибка при запуске бота {nick}: {e}")
@@ -119,8 +123,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Команды:\n"
         "/connect — пошагово создать одного бота\n"
-        "/ai — запустить бота с ИИ (Gemini/OpenRouter/Ollama)\n"
-        "/create <количество> [префикс] — создать несколько ботов\n"
+        "/proxies [количество] — запустить ботов на всех прокси (по 5 по умолчанию)\n"
+        "/create <количество> [префикс] — создать несколько ботов без прокси\n"
         "/stop <ник> — остановить конкретного бота\n"
         "/stop_all — остановить всех ботов\n"
         "/list — список активных ботов\n"
@@ -128,16 +132,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel — отменить текущий диалог"
     )
 
-async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запускает ботов на всех прокси из файла, по bots_per_proxy на прокси."""
+    args = context.args
+    bots_per_proxy = int(args[0]) if args and args[0].isdigit() else 5
+    if bots_per_proxy < 1 or bots_per_proxy > 50:
+        await update.message.reply_text("Количество ботов на прокси должно быть от 1 до 50.")
+        return
+
+    proxies = load_proxies()
+    if not proxies:
+        await update.message.reply_text("❌ Нет прокси в файле. Проверьте proxies.txt")
+        return
+
+    total_bots = len(proxies) * bots_per_proxy
+    if len(active_bots) + total_bots > MAX_BOTS:
+        await update.message.reply_text(
+            f"❌ Превышен лимит активных ботов ({MAX_BOTS}). Сейчас активно {len(active_bots)}.\n"
+            "Используйте /stop_all или подождите."
+        )
+        return
+
+    # Запрос IP и порта
     user_id = update.effective_user.id
-    user_data[user_id] = {'step': 'waiting_for_ip', 'ai_mode': True}
+    user_data[user_id] = {
+        'step': 'waiting_for_ip_for_proxies',
+        'proxies': proxies,
+        'bots_per_proxy': bots_per_proxy,
+        'total_bots': total_bots
+    }
     await update.message.reply_text(
-        "🤖 Запуск бота с ИИ.\nВведи IP-адрес сервера:"
+        f"🚀 Запускаю {total_bots} ботов ({bots_per_proxy} на каждый из {len(proxies)} прокси).\n"
+        f"🌐 Введи IP-адрес сервера:"
     )
 
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_data[user_id] = {'step': 'waiting_for_ip', 'ai_mode': False}
+    user_data[user_id] = {'step': 'waiting_for_ip'}
     await update.message.reply_text(
         "🌐 Введи IP-адрес сервера:"
     )
@@ -162,7 +193,7 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(active_bots) + count > MAX_BOTS:
         await update.message.reply_text(
             f"❌ Превышен лимит активных ботов ({MAX_BOTS}). Сейчас активно {len(active_bots)}.\n"
-            "Используйте /stop_all или подождите, пока некоторые боты завершатся."
+            "Используйте /stop_all или подождите."
         )
         return
     nicks = []
@@ -178,8 +209,7 @@ async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data[user_id] = {
         'step': 'waiting_for_ip_for_create',
         'nicks': nicks,
-        'count': len(nicks),
-        'ai_mode': False
+        'count': len(nicks)
     }
     await update.message.reply_text(
         f"🚀 Запускаю {len(nicks)} ботов.\n🌐 Введи IP-адрес сервера:"
@@ -192,9 +222,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     state = user_data[user_id]
     step = state.get('step')
-    ai_mode = state.get('ai_mode', False)
 
-    if step == 'waiting_for_ip':
+    if step == 'waiting_for_ip_for_proxies':
+        state['ip'] = text
+        state['step'] = 'waiting_for_port_for_proxies'
+        await update.message.reply_text(
+            "🔌 Введи порт (Enter = 25565):"
+        )
+        return
+
+    elif step == 'waiting_for_port_for_proxies':
+        port = text if text else '25565'
+        ip = state['ip']
+        proxies = state['proxies']
+        bots_per_proxy = state['bots_per_proxy']
+
+        success = 0
+        for proxy_index, proxy in enumerate(proxies):
+            for bot_num in range(1, bots_per_proxy + 1):
+                nick = f"BotP{proxy_index+1}_{bot_num}"
+                if nick in active_bots:
+                    continue
+                await update.message.reply_text(f"Запускаю {nick} через {proxy}...")
+                if await launch_bot(update, ip, port, nick, proxy=proxy):
+                    success += 1
+                await asyncio.sleep(5)  # задержка между запусками
+        await update.message.reply_text(
+            f"✅ Запущено {success} из {state['total_bots']} ботов."
+        )
+        del user_data[user_id]
+        return
+
+    elif step == 'waiting_for_ip':
         state['ip'] = text
         state['step'] = 'waiting_for_port'
         await update.message.reply_text(
@@ -205,21 +264,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == 'waiting_for_port':
         port = text if text else '25565'
         state['port'] = port
-        if 'nicks' in state:
-            nicks = state['nicks']
-            success = 0
-            for nick in nicks:
-                await update.message.reply_text(f"Запускаю бота {nick}...")
-                if await launch_bot(update, state['ip'], port, nick, ai_mode=ai_mode):
-                    success += 1
-                await asyncio.sleep(5)
-            await update.message.reply_text(
-                f"✅ Запущено {success} из {len(nicks)} ботов."
-            )
-            del user_data[user_id]
-        else:
-            state['step'] = 'waiting_for_nick'
-            await update.message.reply_text("🧑 Введи никнейм для бота:")
+        state['step'] = 'waiting_for_nick'
+        await update.message.reply_text("🧑 Введи никнейм для бота:")
         return
 
     elif step == 'waiting_for_nick':
@@ -227,7 +273,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ip = state['ip']
         port = state['port']
         await update.message.reply_text(f"Запускаю бота {nick}...")
-        await launch_bot(update, ip, port, nick, ai_mode=ai_mode)
+        await launch_bot(update, ip, port, nick, proxy=None)
         del user_data[user_id]
         return
 
@@ -245,7 +291,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = 0
         for nick in nicks:
             await update.message.reply_text(f"Запускаю бота {nick}...")
-            if await launch_bot(update, state['ip'], port, nick, ai_mode=False):
+            if await launch_bot(update, state['ip'], port, nick, proxy=None):
                 success += 1
             await asyncio.sleep(5)
         await update.message.reply_text(
@@ -254,7 +300,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_data[user_id]
         return
 
-# --- Остальные команды ---
+    # Если состояние не распознано, очищаем
+    del user_data[user_id]
+
+# --- Команды остановки, списка и статуса ---
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Использование: /stop <ник>")
@@ -298,7 +347,8 @@ async def status_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for nick, data in active_bots.items():
         uptime_seconds = time.time() - data['start_time']
         uptime_str = str(timedelta(seconds=int(uptime_seconds)))
-        lines.append(f"**{nick}** — PID {data['process'].pid}, работает {uptime_str}")
+        proxy_info = f", прокси {data['proxy']}" if data.get('proxy') else ""
+        lines.append(f"**{nick}** — PID {data['process'].pid}, работает {uptime_str}{proxy_info}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -322,7 +372,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("connect", connect))
-    app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(CommandHandler("proxies", proxies_command))
     app.add_handler(CommandHandler("create", create_command))
     app.add_handler(CommandHandler("stop", stop_bot))
     app.add_handler(CommandHandler("stop_all", stop_all))
