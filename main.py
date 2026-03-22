@@ -1,4 +1,4 @@
-# main.py – Telegram-бот для управления Minecraft-ботами с поддержкой прокси
+# main.py – Telegram-бот с поддержкой прокси и префикса для имён ботов
 import os
 import subprocess
 import logging
@@ -123,7 +123,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Команды:\n"
         "/connect — пошагово создать одного бота\n"
-        "/proxies [количество] — запустить ботов на всех прокси (по 5 по умолчанию)\n"
+        "/proxies [количество] [префикс] — запустить ботов на всех прокси (по 1 на прокси, можно задать количество и префикс)\n"
         "/create <количество> [префикс] — создать несколько ботов без прокси\n"
         "/stop <ник> — остановить конкретного бота\n"
         "/stop_all — остановить всех ботов\n"
@@ -133,9 +133,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Запускает ботов на всех прокси из файла, по bots_per_proxy на прокси."""
+    """Запускает ботов на всех прокси из файла, по bots_per_proxy на прокси, с заданным префиксом."""
     args = context.args
-    bots_per_proxy = int(args[0]) if args and args[0].isdigit() else 5
+    bots_per_proxy = 1
+    prefix = "BotP"
+    if len(args) > 0 and args[0].isdigit():
+        bots_per_proxy = int(args[0])
+        if len(args) > 1:
+            prefix = args[1]
+    elif len(args) > 0:
+        # первый аргумент не число — считаем его префиксом
+        prefix = args[0]
     if bots_per_proxy < 1 or bots_per_proxy > 50:
         await update.message.reply_text("Количество ботов на прокси должно быть от 1 до 50.")
         return
@@ -159,10 +167,12 @@ async def proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'step': 'waiting_for_ip_for_proxies',
         'proxies': proxies,
         'bots_per_proxy': bots_per_proxy,
-        'total_bots': total_bots
+        'total_bots': total_bots,
+        'prefix': prefix
     }
     await update.message.reply_text(
         f"🚀 Запускаю {total_bots} ботов ({bots_per_proxy} на каждый из {len(proxies)} прокси).\n"
+        f"Префикс имён: {prefix}\n"
         f"🌐 Введи IP-адрес сервера:"
     )
 
@@ -236,11 +246,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ip = state['ip']
         proxies = state['proxies']
         bots_per_proxy = state['bots_per_proxy']
+        prefix = state['prefix']
 
         success = 0
         for proxy_index, proxy in enumerate(proxies):
             for bot_num in range(1, bots_per_proxy + 1):
-                nick = f"BotP{proxy_index+1}_{bot_num}"
+                # Формируем ник: префикс_номер_прокси_номер_бота
+                nick = f"{prefix}_{proxy_index+1}_{bot_num}"
                 if nick in active_bots:
                     continue
                 await update.message.reply_text(f"Запускаю {nick} через {proxy}...")
@@ -303,7 +315,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если состояние не распознано, очищаем
     del user_data[user_id]
 
-# --- Команды остановки, списка и статуса ---
+# --- Остальные команды (stop, list, status, cancel) ---
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Использование: /stop <ник>")
