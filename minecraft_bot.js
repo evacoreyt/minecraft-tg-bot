@@ -1,6 +1,6 @@
 // minecraft_bot.js – базовый бот с поддержкой прокси
 const mineflayer = require('mineflayer');
-const SocksProxyAgent = require('socks-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 
 // ---------- Настройки ----------
 const RECONNECT_DELAY = 10000;      // 10 секунд между попытками
